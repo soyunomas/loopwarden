@@ -3,64 +3,61 @@
 # ==============================================================================
 
 [network]
-# La interfaz física donde escucharemos e inyectaremos
-# IMPORTANTE: Cambia esto a tu interfaz real (ej: eth0, eno1, enp3s0)
 interface = "eno1"
-# Tamaño de captura (SnapLen). 2048 es suficiente para headers + payload básico.
 snaplen = 2048
 
 [alerts]
-# --- Integraciones Externas ---
-# Dejar vacío para desactivar.
-webhook_url = ""    # Ej: "https://hooks.slack.com/services/..."
+# Syslog se mantiene simple
 syslog_server = ""  # Ej: "192.168.1.50:514"
 
+# --- Webhook (Slack/Teams/Discord) ---
+[alerts.webhook]
+enabled = false
+url = "https://hooks.slack.com/services/..."
+
 # --- SMTP (Email) ---
-smtp_enabled = false
-smtp_host = "smtp.gmail.com"
-smtp_port = 587
-smtp_user = "admin@example.com"
-smtp_pass = "secret"
-smtp_to = "ops@example.com"
-smtp_from = "loopwarden@example.com"
+[alerts.smtp]
+enabled = false
+host = "smtp.gmail.com"
+port = 587
+user = "admin@example.com"
+pass = "secret"
+to = "ops@example.com"
+from = "loopwarden@example.com"
+
+# --- Telegram Bot ---
+[alerts.telegram]
+enabled = false
+token = ""
+chat_id = ""
 
 [algorithms]
 
-    # --- ALGORITMO 1: EtherFuse (Pasivo - Payload Fingerprint) ---
-    # Detecta bucles mediante el hash del payload. Si el mismo paquete
-    # se ve demasiadas veces en poco tiempo, es un bucle.
+    # --- ALGORITMO 1: EtherFuse ---
     [algorithms.etherfuse]
     enabled = true
-    history_size = 4096      # Tamaño del buffer circular de hashes
-    alert_threshold = 50     # Cuántos duplicados disparan la alerta
-    storm_pps_limit = 5000   # Umbral de pps global para alerta de tormenta masiva
+    history_size = 4096
+    alert_threshold = 50
+    storm_pps_limit = 5000
 
-    # --- ALGORITMO 2: ActiveProbe (Activo - Injection) ---
-    # Inyecta un paquete Ethernet especial periódicamente. 
-    # Si el paquete vuelve a la interfaz, hay un bucle físico confirmado.
+    # --- ALGORITMO 2: ActiveProbe ---
     [algorithms.active_probe]
     enabled = true
-    interval_ms = 1000       # Frecuencia de inyección (1 segundo)
-    ethertype = 65535        # 0xFFFF (Reservado, seguro para pruebas)
+    interval_ms = 1000
+    ethertype = 65535
     magic_payload = "LOOPWARDEN_PROBE"
 
-    # --- ALGORITMO 3: MAC Storm (Pasivo - MAC Velocity) ---
-    # Detecta si una única dirección MAC está enviando demasiados paquetes.
-    # Útil para detectar NICs defectuosas o bucles en puertos de acceso.
+    # --- ALGORITMO 3: MAC Storm ---
     [algorithms.mac_storm]
     enabled = true
-    max_pps_per_mac = 2000   # Un host normal rara vez pasa de 1000 pps de broadcast
+    max_pps_per_mac = 2000
 
-    # --- ALGORITMO 4: FlapGuard (Pasivo - Topology Stability) ---
-    # [NUEVO] Detecta si una MAC salta entre diferentes VLANs rápidamente.
-    # Síntoma clásico de "Port Leakage" o bucle entre Troncales.
+    # --- ALGORITMO 4: FlapGuard ---
     [algorithms.flap_guard]
     enabled = true
-    threshold = 5            # Alerta si una MAC cambia de VLAN > 5 veces en 1 segundo
+    threshold = 5
 
-    # --- ALGORITMO 5: ArpWatchdog (Pasivo - Protocol Storm) ---
-    # [NUEVO] Monitoriza específicamente tormentas de ARP (Broadcast Radiation).
-    # Los bucles suelen amplificar ARP antes que cualquier otro tráfico.
+    # --- ALGORITMO 5: ArpWatchdog ---
     [algorithms.arp_watch]
     enabled = true
-    max_pps = 500            # Más de 500 WHO-HAS por segundo es sospechoso
+    max_pps = 500

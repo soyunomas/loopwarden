@@ -5,40 +5,7 @@
 ![License](https://img.shields.io/badge/license-MIT-green)
 ![Performance](https://img.shields.io/badge/performance-10Gbps%20Ready-brightgreen)
 
-**LoopWarden** es un Appliance de Detección de Anomalías de Capa 2 (L2) de grado operador para Linux.
-
-A diferencia de las herramientas de monitoreo tradicionales (SNMP/NetFlow) que promedian datos cada minutos, LoopWarden inspecciona **cada trama Ethernet en tiempo real** utilizando filtros BPF en el Kernel y un motor de análisis "Zero-Allocation" en Go.
-
-> **¿Por qué LoopWarden si ya tengo STP?**
-> Spanning Tree (STP/RSTP) es lento en converger y a menudo falla en "Edge Ports" donde los usuarios conectan switches no gestionados o cometen errores de cableado. LoopWarden detecta bucles, tormentas y anomalías de topología en **milisegundos**, proporcionando la telemetría que a los switches les falta.
-
-## 🏗️ Arquitectura "Fast-Path"
-
-LoopWarden está diseñado para procesar tráfico a velocidad de línea sin ahogar la CPU:
-
-```text
-[ NETWORK WIRE ] <=== (10Gbps+)
-      ||
-[ NIC HARDWARE ]
-      ||
-[ KERNEL RING ] <--- (AF_PACKET RX_RING)
-      ||
-[ BPF FILTER ]  <--- "Drop Unicast. Keep Broadcast/Multicast/ARP/Tagged"
-      ||
-[ GO RUNTIME ]  <--- (Zero-Copy Read)
-      ||
-      +--> [ Engine ] (Parallel Processing)
-             ||
-             +-- 1. ActiveProbe (Injection)
-             +-- 2. EtherFuse (Payload Hash)
-             +-- 3. MacStorm (Velocity Check)
-             +-- 4. FlapGuard (Topology Check)
-             +-- 5. ArpWatchdog (Protocol Check)
-             ||
-[ NOTIFIER ] <-- (Global Deduplication & Throttling)
-      ||
-[ ALERTS ] ----> Slack / Syslog / Email
-```
+**LoopWarden** es un Detector de Bucles Ethernet (L2 Loop Detector) de alto rendimiento. Monitoriza la red en tiempo real para alertar sobre bucles físicos y tormentas de broadcast en milisegundos, reduciendo drásticamente el tiempo de diagnóstico (MTTR).
 
 ## 🚀 Características Principales
 
@@ -92,7 +59,7 @@ En una tormenta de broadcast, una red puede generar millones de eventos por segu
 
 *   **Global Dampening:** Si el sistema detecta una inundación de alertas (>20 alertas/minuto), activa automáticamente un "Modo Pánico". Silencia las notificaciones durante 60 segundos y envía un único resumen consolidado.
 *   **Adaptive Hysteresis:** Cada algoritmo tiene memoria. Si *FlapGuard* detecta un host inestable, te avisa una vez y luego guarda silencio por 30 segundos sobre ese host específico, manteniendo tus canales de comunicación limpios.
-*   **Integraciones:** Soporte nativo para Webhooks (Slack/Teams/Discord), Syslog (RFC 3164) y SMTP.
+*   **Integraciones:** Webhooks JSON (Slack, Discord, Mattermost, Google Chat, Rocket.Chat), **Telegram Bots**, Syslog (RFC 3164) y SMTP (Email).
 
 ## ⚙️ Referencia de Configuración (`config.toml`)
 
@@ -103,15 +70,21 @@ A continuación se detallan todos los parámetros disponibles en el archivo de c
 | Sección | Parámetro | Default | Descripción |
 | :--- | :--- | :--- | :--- |
 | **[network]** | `interface` | `"eno1"` | **Crítico.** Nombre exacto de la interfaz de red a escuchar (ver `ip link`). |
-| | `snaplen` | `2048` | Bytes a capturar por trama. 2048 es suficiente para headers + payload. |
-| **[alerts]** | `webhook_url` | `""` | URL del Webhook (Slack, Discord, Teams) para enviar alertas JSON. |
-| | `syslog_server` | `""` | Dirección `IP:Puerto` del servidor Syslog (UDP) para integración SIEM. |
-| | `smtp_enabled` | `false` | Activa el envío de alertas críticas por correo electrónico. |
-| | `smtp_host` | `""` | Servidor SMTP (ej: `smtp.gmail.com`). |
-| | `smtp_port` | `587` | Puerto SMTP (587 para TLS, 25 para Relay). |
-| | `smtp_user` | `""` | Usuario para autenticación SMTP. |
-| | `smtp_pass` | `""` | Contraseña o App Password para SMTP. |
-| | `smtp_to` | `""` | Dirección de correo destino. |
+| | `snaplen` | `2048` | Bytes a capturar por trama. |
+| **[alerts]** | `syslog_server` | `""` | Dirección `IP:Puerto` del servidor Syslog (UDP). |
+| **[alerts.webhook]** | `enabled` | `false` | Activa/Desactiva notificaciones vía Webhook. |
+| | `url` | `""` | URL del Webhook (Slack, Discord, Teams). |
+| **[alerts.smtp]** | `enabled` | `false` | Activa el envío por correo electrónico. |
+| | `host` | `"smtp.gmail.com"` | Servidor SMTP. |
+| | `port` | `587` | Puerto SMTP (587 para TLS/STARTTLS). |
+| | `user` | `""` | Usuario SMTP (email completo). |
+| | `pass` | `""` | Contraseña o App Password. |
+| | `to` | `""` | Destinatario de la alerta. |
+| | `from` | `""` | Remitente (debe coincidir con el usuario en Gmail). |
+| **[alerts.telegram]** | `enabled` | `false` | Activa notificaciones a Telegram. |
+| | `token` | `""` | Token del bot proporcionado por @BotFather. |
+| | `chat_id` | `""` | ID numérico del usuario o grupo (ej: `-100...` para grupos). |
+
 
 ### 🧠 Algoritmos de Detección
 
@@ -212,6 +185,39 @@ Para interfaces de red de alta velocidad (10Gbps o superior) en entornos de alta
         *   `sudo sysctl -w net.core.rmem_max=26214400`
         *   `sudo sysctl -w net.core.rmem_default=26214400`
     *   **Descripción:** `rmem_max` y `rmem_default` controlan el tamaño máximo y por defecto del buffer de recepción para todos los sockets del Kernel. Valores más altos (aquí 25MB) permiten que los sockets raw de LoopWarden acumulen más datos en el Kernel antes de que la aplicación Go necesite leerlos, reduciendo el riesgo de sobrecarga del procesador y garantizando la captura completa incluso bajo tormentas severas. Para que sean permanentes, añadir al `/etc/sysctl.conf`.
+
+> **¿Por qué LoopWarden si ya tengo STP?**
+> Spanning Tree (STP/RSTP) es lento en converger y a menudo falla en "Edge Ports" donde los usuarios conectan switches no gestionados o cometen errores de cableado. LoopWarden detecta bucles, tormentas y anomalías de topología en **milisegundos**, proporcionando la telemetría que a los switches les falta.
+
+## 🏗️ Arquitectura "Fast-Path"
+
+LoopWarden está diseñado para procesar tráfico a velocidad de línea sin ahogar la CPU:
+
+```text
+[ NETWORK WIRE ] <=== (10Gbps+)
+      ||
+[ NIC HARDWARE ]
+      ||
+[ KERNEL RING ] <--- (AF_PACKET RX_RING)
+      ||
+[ BPF FILTER ]  <--- "Drop Unicast. Keep Broadcast/Multicast/ARP/Tagged"
+      ||
+[ GO RUNTIME ]  <--- (Zero-Copy Read)
+      ||
+      +--> [ Engine ] (Parallel Processing)
+             ||
+             +-- 1. ActiveProbe (Injection)
+             +-- 2. EtherFuse (Payload Hash)
+             +-- 3. MacStorm (Velocity Check)
+             +-- 4. FlapGuard (Topology Check)
+             +-- 5. ArpWatchdog (Protocol Check)
+             ||
+[ NOTIFIER ] <-- (Global Deduplication & Throttling)
+      ||
+[ ALERTS ] ----> Slack / Syslog / Email
+```
+
+
 
 ## 📜 Licencia
 

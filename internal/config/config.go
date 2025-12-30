@@ -21,7 +21,6 @@ type AlgorithmConfig struct {
 	EtherFuse   EtherFuseConfig   `toml:"etherfuse"`
 	ActiveProbe ActiveProbeConfig `toml:"active_probe"`
 	MacStorm    MacStormConfig    `toml:"mac_storm"`
-	// Nuevos algoritmos añadidos
 	FlapGuard   FlapGuardConfig   `toml:"flap_guard"`
 	ArpWatch    ArpWatchConfig    `toml:"arp_watch"`
 }
@@ -45,33 +44,46 @@ type MacStormConfig struct {
 	MaxPPSPerMac uint64 `toml:"max_pps_per_mac"`
 }
 
-// --- Nuevas Configuraciones ---
-
 type FlapGuardConfig struct {
 	Enabled   bool `toml:"enabled"`
-	Threshold int  `toml:"threshold"` // Ej: 5 cambios de VLAN en 1 segundo
+	Threshold int  `toml:"threshold"`
 }
 
 type ArpWatchConfig struct {
 	Enabled bool   `toml:"enabled"`
-	MaxPPS  uint64 `toml:"max_pps"`   // Ej: 500 requests/segundo
+	MaxPPS  uint64 `toml:"max_pps"`
 }
 
-// ------------------------------
+// --- CONFIGURACIÓN DE ALERTAS (100% ESTRUCTURADA) ---
 
-// Configuración de notificaciones externas
 type AlertsConfig struct {
-	WebhookURL   string `toml:"webhook_url"`   // Slack/Teams/Discord
-	SyslogServer string `toml:"syslog_server"` // udp:192.168.1.50:514
+	SyslogServer string `toml:"syslog_server"` // Syslog se mantiene simple (opcional cambiarlo)
 
-	// Configuración SMTP
-	SmtpEnabled bool   `toml:"smtp_enabled"`
-	SmtpHost    string `toml:"smtp_host"`
-	SmtpPort    int    `toml:"smtp_port"`
-	SmtpUser    string `toml:"smtp_user"`
-	SmtpPass    string `toml:"smtp_pass"`
-	SmtpTo      string `toml:"smtp_to"`
-	SmtpFrom    string `toml:"smtp_from"`
+	// Ahora todos son objetos consistentes
+	Webhook  WebhookConfig  `toml:"webhook"`
+	Smtp     SmtpConfig     `toml:"smtp"`
+	Telegram TelegramConfig `toml:"telegram"`
+}
+
+type WebhookConfig struct {
+	Enabled bool   `toml:"enabled"`
+	URL     string `toml:"url"`
+}
+
+type SmtpConfig struct {
+	Enabled bool   `toml:"enabled"`
+	Host    string `toml:"host"`
+	Port    int    `toml:"port"`
+	User    string `toml:"user"`
+	Pass    string `toml:"pass"`
+	To      string `toml:"to"`
+	From    string `toml:"from"`
+}
+
+type TelegramConfig struct {
+	Enabled bool   `toml:"enabled"`
+	Token   string `toml:"token"`
+	ChatID  string `toml:"chat_id"`
 }
 
 func LoadConfig(path string) (*Config, error) {
