@@ -1,0 +1,16 @@
+[Unit]
+Description=LoopWarden Network Loop Detector
+After=network.target syslog.service
+
+[Service]
+Type=simple
+User=root
+# Ajusta la ruta a donde hayas copiado el binario y el config
+ExecStart=/usr/local/bin/loopwarden -config /etc/loopwarden/config.toml
+Restart=always
+RestartSec=5s
+# Límites para procesos de alta carga (opcional pero recomendado)
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

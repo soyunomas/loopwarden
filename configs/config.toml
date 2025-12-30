@@ -1,0 +1,33 @@
+# LoopWarden Configuration
+# Modular Loop Detection System
+
+[network]
+# La interfaz física donde escucharemos e inyectaremos
+interface = "eno1"
+# Tamaño de captura (SnapLen)
+snaplen = 2048
+
+[algorithms]
+
+    # --- ALGORITMO 1: EtherFuse (Pasivo - Payload Fingerprint) ---
+    [algorithms.etherfuse]
+    enabled = true
+    history_size = 4096
+    alert_threshold = 50
+    storm_pps_limit = 5000
+
+    # --- ALGORITMO 2: ActiveProbe (Activo - Injection) ---
+    [algorithms.active_probe]
+    enabled = true
+    interval_ms = 1000
+    ethertype = 65535 # 0xFFFF
+    magic_payload = "LOOPWARDEN_PROBE"
+
+    # --- ALGORITMO 3: MAC Storm (Pasivo - MAC Velocity) ---
+    # Detecta si una única dirección MAC está enviando demasiados paquetes por segundo.
+    # Útil para detectar bucles donde una MAC específica entra en pánico o "flapping".
+    [algorithms.mac_storm]
+    enabled = true
+    # Cuántos paquetes/segundo permitimos de una sola MAC antes de alertar.
+    # Un host normal rara vez pasa de 1000 pps de broadcast.
+    max_pps_per_mac = 2000
