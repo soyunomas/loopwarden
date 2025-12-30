@@ -21,6 +21,9 @@ type AlgorithmConfig struct {
 	EtherFuse   EtherFuseConfig   `toml:"etherfuse"`
 	ActiveProbe ActiveProbeConfig `toml:"active_probe"`
 	MacStorm    MacStormConfig    `toml:"mac_storm"`
+	// Nuevos algoritmos añadidos
+	FlapGuard   FlapGuardConfig   `toml:"flap_guard"`
+	ArpWatch    ArpWatchConfig    `toml:"arp_watch"`
 }
 
 type EtherFuseConfig struct {
@@ -41,6 +44,20 @@ type MacStormConfig struct {
 	Enabled      bool   `toml:"enabled"`
 	MaxPPSPerMac uint64 `toml:"max_pps_per_mac"`
 }
+
+// --- Nuevas Configuraciones ---
+
+type FlapGuardConfig struct {
+	Enabled   bool `toml:"enabled"`
+	Threshold int  `toml:"threshold"` // Ej: 5 cambios de VLAN en 1 segundo
+}
+
+type ArpWatchConfig struct {
+	Enabled bool   `toml:"enabled"`
+	MaxPPS  uint64 `toml:"max_pps"`   // Ej: 500 requests/segundo
+}
+
+// ------------------------------
 
 // Configuración de notificaciones externas
 type AlertsConfig struct {
