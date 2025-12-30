@@ -2,7 +2,6 @@ package detector
 
 import (
 	"fmt"
-	"hash/fnv"
 	"net"
 	"sync"
 	"time"
@@ -12,95 +11,106 @@ import (
 	"github.com/soyunomas/loopwarden/internal/notifier"
 )
 
-// Cooldown para evitar spam de alertas
-const FuseAlertCooldown = 5 * time.Second
+const (
+	// FNV-1a constantes para implementación inline (evita import hash/fnv y allocs)
+	offset64 = 14695981039346656037
+	prime64  = 1099511628211
+)
 
 type EtherFuse struct {
 	cfg            *config.EtherFuseConfig
-	notify         *notifier.Notifier // Referencia al notificador
-	mu             sync.Mutex
-	hashHistory    []uint64
-	historyIndex   int
-	dupCounter     int
-	lastReset      time.Time
-	packetsSec     uint64
-	lastDupAlert   time.Time
-	lastStormAlert time.Time
+	notify         *notifier.Notifier
+	mu             sync.Mutex // Protege todo el estado interno
+
+	// OPTIMIZACIÓN 1: Estructura Dual (Ring + Map) para O(1)
+	ringBuffer  []uint64
+	lookupTable map[uint64]uint8 // Count de apariciones
+	writeCursor int              // Puntero del Ring Buffer
+
+	packetsSec    uint64
+	lastReset     time.Time
+	lastAlertTime time.Time
 }
 
 func NewEtherFuse(cfg *config.EtherFuseConfig, n *notifier.Notifier) *EtherFuse {
 	return &EtherFuse{
-		cfg:          cfg,
-		notify:       n,
-		hashHistory:  make([]uint64, cfg.HistorySize),
-		historyIndex: 0,
-		lastReset:    time.Now(),
+		cfg:         cfg,
+		notify:      n,
+		ringBuffer:  make([]uint64, cfg.HistorySize),
+		lookupTable: make(map[uint64]uint8, cfg.HistorySize),
+		writeCursor: 0,
+		lastReset:   time.Now(),
 	}
 }
 
-func (ef *EtherFuse) Name() string {
-	return "EtherFuse"
-}
+func (ef *EtherFuse) Name() string { return "EtherFuse" }
 
-func (ef *EtherFuse) Start(conn *packet.Conn, iface *net.Interface) error {
-	return nil
+func (ef *EtherFuse) Start(conn *packet.Conn, iface *net.Interface) error { return nil }
+
+// Inline FNV-1a implementation (Zero Allocation)
+func hashBody(data []byte) uint64 {
+	var hash uint64 = offset64
+	for _, b := range data {
+		hash ^= uint64(b)
+		hash *= prime64
+	}
+	return hash
 }
 
 func (ef *EtherFuse) OnPacket(data []byte, length int, vlanID uint16) {
-	h := fnv.New64a()
-	h.Write(data[:length])
-	sum := h.Sum64()
+	// 1. Hashing sin allocs
+	sum := hashBody(data[:length])
 
 	ef.mu.Lock()
-	defer ef.mu.Unlock()
 
-	// 1. Detección de Volumetría (Storm)
+	// Check rápido de tormenta global
 	ef.packetsSec++
-	now := time.Now()
-	
-	if now.Sub(ef.lastReset) >= time.Second {
-		if ef.packetsSec > ef.cfg.StormPPSLimit {
-			if now.Sub(ef.lastStormAlert) > FuseAlertCooldown {
-				msg := fmt.Sprintf("[EtherFuse] ⛈️  Broadcast Storm detected: %d pps (throttling logs for 5s)", ef.packetsSec)
-				ef.notify.Alert(msg)
-				ef.lastStormAlert = now
-			}
-		}
-		ef.packetsSec = 0
-		ef.lastReset = now
-		ef.dupCounter = 0
-	}
-
-	// 2. Detección de Duplicados
-	isDup := false
-	for _, v := range ef.hashHistory {
-		if v == sum {
-			isDup = true
-			break
-		}
-	}
-
-	if isDup {
-		ef.dupCounter++
-		if ef.dupCounter > ef.cfg.AlertThreshold {
-			if now.Sub(ef.lastDupAlert) > FuseAlertCooldown {
-				location := "Native VLAN"
-				if vlanID != 0 {
-					location = fmt.Sprintf("VLAN %d", vlanID)
+	if ef.packetsSec&0x3FF == 0 { // Check cada 1024 paquetes
+		now := time.Now()
+		if now.Sub(ef.lastReset) >= time.Second {
+			if ef.packetsSec > ef.cfg.StormPPSLimit {
+				if now.Sub(ef.lastAlertTime) > 5*time.Second {
+					go ef.notify.Alert(fmt.Sprintf("[EtherFuse] ⛈️ Storm: %d pps", ef.packetsSec))
+					ef.lastAlertTime = now
 				}
-				
-				msg := fmt.Sprintf("[EtherFuse] 🚨 LOOP DETECTED on %s! Frame Hash %x repeated %d times", location, sum, ef.dupCounter)
-				ef.notify.Alert(msg)
-				
-				ef.lastDupAlert = now
 			}
-			ef.dupCounter = 0 
+			ef.packetsSec = 0
+			ef.lastReset = now
+		}
+	}
+
+	// 2. Lógica O(1) de detección de bucle
+	count := ef.lookupTable[sum]
+
+	if count > 0 {
+		// Es un duplicado
+		newCount := count + 1
+		ef.lookupTable[sum] = newCount
+
+		if int(newCount) > ef.cfg.AlertThreshold {
+			if time.Since(ef.lastAlertTime) > 5*time.Second {
+				go ef.notify.Alert(fmt.Sprintf("[EtherFuse] 🚨 LOOP: Hash %x seen %d times", sum, newCount))
+				ef.lastAlertTime = time.Now()
+			}
+			// Reset count to avoid spamming
+			ef.lookupTable[sum] = 0
 		}
 	} else {
-		ef.hashHistory[ef.historyIndex] = sum
-		ef.historyIndex++
-		if ef.historyIndex >= ef.cfg.HistorySize {
-			ef.historyIndex = 0
+		// Nuevo hash.
+		oldHash := ef.ringBuffer[ef.writeCursor]
+
+		if oldHash != 0 {
+			delete(ef.lookupTable, oldHash)
+		}
+
+		ef.ringBuffer[ef.writeCursor] = sum
+		ef.lookupTable[sum] = 1
+
+		ef.writeCursor++
+		if ef.writeCursor >= len(ef.ringBuffer) {
+			ef.writeCursor = 0
 		}
 	}
+
+	ef.mu.Unlock()
 }
