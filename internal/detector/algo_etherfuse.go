@@ -12,7 +12,6 @@ import (
 )
 
 const (
-	// FNV-1a constantes para implementación inline (evita import hash/fnv y allocs)
 	offset64 = 14695981039346656037
 	prime64  = 1099511628211
 )
@@ -20,12 +19,11 @@ const (
 type EtherFuse struct {
 	cfg            *config.EtherFuseConfig
 	notify         *notifier.Notifier
-	mu             sync.Mutex // Protege todo el estado interno
+	mu             sync.Mutex 
 
-	// OPTIMIZACIÓN 1: Estructura Dual (Ring + Map) para O(1)
 	ringBuffer  []uint64
-	lookupTable map[uint64]uint8 // Count de apariciones
-	writeCursor int              // Puntero del Ring Buffer
+	lookupTable map[uint64]uint8 
+	writeCursor int              
 
 	packetsSec    uint64
 	lastReset     time.Time
@@ -47,7 +45,6 @@ func (ef *EtherFuse) Name() string { return "EtherFuse" }
 
 func (ef *EtherFuse) Start(conn *packet.Conn, iface *net.Interface) error { return nil }
 
-// Inline FNV-1a implementation (Zero Allocation)
 func hashBody(data []byte) uint64 {
 	var hash uint64 = offset64
 	for _, b := range data {
@@ -58,19 +55,22 @@ func hashBody(data []byte) uint64 {
 }
 
 func (ef *EtherFuse) OnPacket(data []byte, length int, vlanID uint16) {
-	// 1. Hashing sin allocs
+	// 1. Calcular Hash del contenido
 	sum := hashBody(data[:length])
 
 	ef.mu.Lock()
 
-	// Check rápido de tormenta global
+	// Check de tormenta global (PPS)
 	ef.packetsSec++
-	if ef.packetsSec&0x3FF == 0 { // Check cada 1024 paquetes
+	if ef.packetsSec&0x3FF == 0 { 
 		now := time.Now()
 		if now.Sub(ef.lastReset) >= time.Second {
 			if ef.packetsSec > ef.cfg.StormPPSLimit {
 				if now.Sub(ef.lastAlertTime) > 5*time.Second {
-					go ef.notify.Alert(fmt.Sprintf("[EtherFuse] ⛈️ Storm: %d pps", ef.packetsSec))
+					// Extraer ubicación para la alerta de tormenta
+					loc := "Native"
+					if vlanID != 0 { loc = fmt.Sprintf("%d", vlanID) }
+					go ef.notify.Alert(fmt.Sprintf("[EtherFuse] ⛈️ STORM DETECTED! VLAN: %s | Rate: %d pps", loc, ef.packetsSec))
 					ef.lastAlertTime = now
 				}
 			}
@@ -79,37 +79,55 @@ func (ef *EtherFuse) OnPacket(data []byte, length int, vlanID uint16) {
 		}
 	}
 
-	// 2. Lógica O(1) de detección de bucle
+	// 2. Lógica de detección de bucle por repetición de hash
 	count := ef.lookupTable[sum]
 
 	if count > 0 {
-		// Es un duplicado
 		newCount := count + 1
 		ef.lookupTable[sum] = newCount
 
 		if int(newCount) > ef.cfg.AlertThreshold {
 			if time.Since(ef.lastAlertTime) > 5*time.Second {
-				go ef.notify.Alert(fmt.Sprintf("[EtherFuse] 🚨 LOOP: Hash %x seen %d times", sum, newCount))
+				
+				// --- NUEVA LÓGICA DE EXTRACCIÓN DE MACs ---
+				// Extraemos los datos ANTES de disparar la goroutine para evitar race conditions
+				// con el buffer del sniffer.
+				dstMac := "Unknown"
+				srcMac := "Unknown"
+				if length >= 12 {
+					dstMac = net.HardwareAddr(data[0:6]).String()
+					srcMac = net.HardwareAddr(data[6:12]).String()
+				}
+
+				vlanStr := "Native"
+				if vlanID != 0 {
+					vlanStr = fmt.Sprintf("%d", vlanID)
+				}
+
+				// Formatear mensaje detallado
+				msg := fmt.Sprintf("[EtherFuse] 🚨 LOOP DETECTED!\n"+
+					"    VLAN: %s\n"+
+					"    SOURCE MAC: %s\n"+
+					"    DEST MAC:   %s\n"+
+					"    PACKET HASH: %x\n"+
+					"    REPETITIONS: %d", 
+					vlanStr, srcMac, dstMac, sum, newCount)
+
+				go ef.notify.Alert(msg)
 				ef.lastAlertTime = time.Now()
 			}
-			// Reset count to avoid spamming
+			// Reset para evitar spam del mismo paquete
 			ef.lookupTable[sum] = 0
 		}
 	} else {
-		// Nuevo hash.
+		// Nuevo hash, actualizar ring buffer
 		oldHash := ef.ringBuffer[ef.writeCursor]
-
 		if oldHash != 0 {
 			delete(ef.lookupTable, oldHash)
 		}
-
 		ef.ringBuffer[ef.writeCursor] = sum
 		ef.lookupTable[sum] = 1
-
-		ef.writeCursor++
-		if ef.writeCursor >= len(ef.ringBuffer) {
-			ef.writeCursor = 0
-		}
+		ef.writeCursor = (ef.writeCursor + 1) % len(ef.ringBuffer)
 	}
 
 	ef.mu.Unlock()
