@@ -37,6 +37,7 @@ type ActiveProbeConfig struct {
 	IntervalMs   int    `toml:"interval_ms"`
 	Ethertype    uint16 `toml:"ethertype"`
 	MagicPayload string `toml:"magic_payload"`
+	TargetMAC    string `toml:"target_mac"` // Nuevo: MAC de destino para la sonda (opcional)
 }
 
 type MacStormConfig struct {

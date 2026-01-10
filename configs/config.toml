@@ -46,6 +46,7 @@ chat_id = ""
     interval_ms = 1000
     ethertype = 65535
     magic_payload = "LOOPWARDEN_PROBE"
+    target_mac = "" # Opcional: "FF:FF:FF:FF:FF:FF" para broadcast, o una MAC unicast específica.
 
     # --- ALGORITMO 3: MAC Storm ---
     [algorithms.mac_storm]

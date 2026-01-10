@@ -12,6 +12,7 @@ import (
 	"github.com/mdlayher/packet"
 	"github.com/soyunomas/loopwarden/internal/config"
 	"github.com/soyunomas/loopwarden/internal/notifier"
+	"github.com/soyunomas/loopwarden/internal/utils"
 )
 
 const ProbeAlertCooldown = 10 * time.Second
@@ -95,13 +96,33 @@ func (ap *ActiveProbe) OnPacket(data []byte, length int, vlanID uint16) {
 				ap.mu.Lock()
 				now := time.Now()
 				if now.Sub(ap.lastAlert) > ProbeAlertCooldown {
-					vlanMsg := "Native VLAN"
-					if vlanID != 0 {
-						vlanMsg = fmt.Sprintf("VLAN %d", vlanID)
-					}
 					
-					msg := fmt.Sprintf("[ActiveProbe] 🚨 LOOP CONFIRMED! My probe returned on %s! (Type: 0x%X)", vlanMsg, etherType)
-					ap.notify.Alert(msg)
+					// Capturamos DST MAC para ver si regresó como broadcast o unicast
+					dstMac := data[0:6]
+					
+					go func(vlan uint16, dMac []byte) {
+						vlanMsg := "Native VLAN"
+						if vlan != 0 {
+							vlanMsg = fmt.Sprintf("VLAN %d", vlan)
+						}
+
+						// Chequeo de integridad: ¿Volvió como Broadcast o alguien lo reescribió?
+						retInfo := utils.ClassifyMAC(dMac)
+						pathMsg := "Broadcast Path"
+						if retInfo.Name != "Broadcast" {
+							pathMsg = fmt.Sprintf("Altered Path via %s (%s)", retInfo.Name, retInfo.Description)
+						}
+
+						msg := fmt.Sprintf("[ActiveProbe] 🚨 LOOP CONFIRMED!\n"+
+							"    VLAN:   %s\n"+
+							"    STATUS: HARD LOOP (Probe returned)\n"+
+							"    PATH:   %s\n"+
+							"    ACTION: IMMEDIATE DISCONNECT REQUIRED.", 
+							vlanMsg, pathMsg)
+						
+						ap.notify.Alert(msg)
+					}(vlanID, dstMac)
+
 					ap.lastAlert = now
 				}
 				ap.mu.Unlock()

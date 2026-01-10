@@ -9,6 +9,7 @@ import (
 	"github.com/mdlayher/packet"
 	"github.com/soyunomas/loopwarden/internal/config"
 	"github.com/soyunomas/loopwarden/internal/notifier"
+	"github.com/soyunomas/loopwarden/internal/utils"
 )
 
 const (
@@ -70,7 +71,14 @@ func (ef *EtherFuse) OnPacket(data []byte, length int, vlanID uint16) {
 					// Extraer ubicación para la alerta de tormenta
 					loc := "Native"
 					if vlanID != 0 { loc = fmt.Sprintf("%d", vlanID) }
-					go ef.notify.Alert(fmt.Sprintf("[EtherFuse] ⛈️ STORM DETECTED! VLAN: %s | Rate: %d pps", loc, ef.packetsSec))
+					
+					// Copia de seguridad para la goroutine
+					pps := ef.packetsSec
+					
+					go func(l string, p uint64) {
+						ef.notify.Alert(fmt.Sprintf("[EtherFuse] ⛈️ GLOBAL STORM DETECTED! VLAN: %s | Rate: %d pps", l, p))
+					}(loc, pps)
+					
 					ef.lastAlertTime = now
 				}
 			}
@@ -89,14 +97,15 @@ func (ef *EtherFuse) OnPacket(data []byte, length int, vlanID uint16) {
 		if int(newCount) > ef.cfg.AlertThreshold {
 			if time.Since(ef.lastAlertTime) > 5*time.Second {
 				
-				// --- NUEVA LÓGICA DE EXTRACCIÓN DE MACs ---
-				// Extraemos los datos ANTES de disparar la goroutine para evitar race conditions
-				// con el buffer del sniffer.
-				dstMac := "Unknown"
-				srcMac := "Unknown"
+				// --- NUEVA LÓGICA CON PROTOCOL MAPPING ---
+				// Extraemos los datos raw ahora (Hot Path copy) para procesarlos después
+				var dstMacBytes, srcMacBytes []byte
 				if length >= 12 {
-					dstMac = net.HardwareAddr(data[0:6]).String()
-					srcMac = net.HardwareAddr(data[6:12]).String()
+					// Copia defensiva (slice header)
+					dstMacBytes = make([]byte, 6)
+					srcMacBytes = make([]byte, 6)
+					copy(dstMacBytes, data[0:6])
+					copy(srcMacBytes, data[6:12])
 				}
 
 				vlanStr := "Native"
@@ -104,16 +113,30 @@ func (ef *EtherFuse) OnPacket(data []byte, length int, vlanID uint16) {
 					vlanStr = fmt.Sprintf("%d", vlanID)
 				}
 
-				// Formatear mensaje detallado
-				msg := fmt.Sprintf("[EtherFuse] 🚨 LOOP DETECTED!\n"+
-					"    VLAN: %s\n"+
-					"    SOURCE MAC: %s\n"+
-					"    DEST MAC:   %s\n"+
-					"    PACKET HASH: %x\n"+
-					"    REPETITIONS: %d", 
-					vlanStr, srcMac, dstMac, sum, newCount)
+				// Disparamos Goroutine para el análisis de protocolo (Cold Path)
+				go func(v string, sMac, dMac []byte, h uint64, reps uint8) {
+					// Clasificación forense
+					targetInfo := utils.ClassifyMAC(dMac)
+					impact := "User Traffic"
+					if targetInfo.IsCritical {
+						impact = "🔥 CRITICAL INFRASTRUCTURE FAILURE"
+					}
 
-				go ef.notify.Alert(msg)
+					srcStr := net.HardwareAddr(sMac).String()
+					dstStr := net.HardwareAddr(dMac).String()
+
+					msg := fmt.Sprintf("[EtherFuse] 🚨 LOOP DETECTED!\n"+
+						"    VLAN:        %s\n"+
+						"    SOURCE MAC:  %s\n"+
+						"    TARGET MAC:  %s (%s)\n"+
+						"    PROTOCOL:    %s\n"+
+						"    IMPACT:      %s\n"+
+						"    REPETITIONS: %d (Hash: %x)", 
+						v, srcStr, dstStr, targetInfo.Name, targetInfo.Description, impact, reps, h)
+
+					ef.notify.Alert(msg)
+				}(vlanStr, srcMacBytes, dstMacBytes, sum, newCount)
+
 				ef.lastAlertTime = time.Now()
 			}
 			// Reset para evitar spam del mismo paquete

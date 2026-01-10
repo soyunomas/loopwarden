@@ -10,12 +10,14 @@ import (
 	"github.com/mdlayher/packet"
 	"github.com/soyunomas/loopwarden/internal/config"
 	"github.com/soyunomas/loopwarden/internal/notifier"
+	"github.com/soyunomas/loopwarden/internal/utils"
 )
 
 const (
 	EtherTypeARP    = 0x0806
+	EtherTypeIPv6   = 0x86DD
 	OpCodeRequest   = 1
-	ArpAlertCooldown = 20 * time.Second // 🔇 Solo 1 alerta cada 20s
+	ArpAlertCooldown = 20 * time.Second 
 )
 
 type ArpWatchdog struct {
@@ -25,8 +27,6 @@ type ArpWatchdog struct {
 	
 	packetCount uint64
 	lastReset   time.Time
-	
-	// OPT(14): Variable de estado para controlar el silencio
 	lastAlert   time.Time 
 }
 
@@ -35,7 +35,6 @@ func NewArpWatchdog(cfg *config.ArpWatchConfig, n *notifier.Notifier) *ArpWatchd
 		cfg:       cfg,
 		notify:    n,
 		lastReset: time.Now(),
-		// Inicializamos en zero-value, funcionará bien
 	}
 }
 
@@ -48,7 +47,7 @@ func (aw *ArpWatchdog) Start(conn *packet.Conn, iface *net.Interface) error {
 }
 
 func (aw *ArpWatchdog) OnPacket(data []byte, length int, vlanID uint16) {
-	// Cálculo de offsets (VLAN vs Native)
+	// Offset logic
 	ethTypeOffset := 12
 	if vlanID != 0 {
 		ethTypeOffset = 16
@@ -58,34 +57,42 @@ func (aw *ArpWatchdog) OnPacket(data []byte, length int, vlanID uint16) {
 		return
 	}
 
-	// OPT(11): Lectura directa sin allocs
 	ethType := binary.BigEndian.Uint16(data[ethTypeOffset : ethTypeOffset+2])
 	
-	if ethType != EtherTypeARP {
-		return
+	isTargetProtocol := false
+	protocolName := ""
+
+	// 1. Check ARP (IPv4)
+	if ethType == EtherTypeARP {
+		arpOffset := ethTypeOffset + 2
+		if length >= arpOffset+8 {
+			opCode := binary.BigEndian.Uint16(data[arpOffset+6 : arpOffset+8])
+			if opCode == OpCodeRequest {
+				isTargetProtocol = true
+				protocolName = "ARP (IPv4)"
+			}
+		}
+	} else if ethType == EtherTypeIPv6 {
+		// 2. Check IPv6 Neighbor Discovery (via Multicast MAC prefix 33:33:ff)
+		// Es más rápido mirar la MAC de destino que parsear headers IPv6 + ICMPv6
+		// Neighbor Solicitation siempre va a 33:33:ff:xx:xx:xx
+		if length >= 6 {
+			dstMac := data[0:6]
+			if utils.IsIPv6NeighborDiscovery(dstMac) {
+				isTargetProtocol = true
+				protocolName = "NDP (IPv6 Neighbor Discovery)"
+			}
+		}
 	}
 
-	arpOffset := ethTypeOffset + 2
-	if length < arpOffset+8 {
-		return
-	}
-
-	// OpCode check (Request = 1)
-	opCode := binary.BigEndian.Uint16(data[arpOffset+6 : arpOffset+8])
-
-	if opCode == OpCodeRequest {
+	if isTargetProtocol {
 		aw.mu.Lock()
 		aw.packetCount++
 		
 		now := time.Now()
 		
-		// Ventana de tiempo: 1 segundo
 		if now.Sub(aw.lastReset) >= time.Second {
-			
-			// Si superamos el umbral de PPS...
 			if aw.packetCount > aw.cfg.MaxPPS {
-				
-				// ... Y ha pasado el tiempo de enfriamiento (Cooldown)
 				if now.Sub(aw.lastAlert) > ArpAlertCooldown {
 					
 					vlanMsg := "Native VLAN"
@@ -93,17 +100,23 @@ func (aw *ArpWatchdog) OnPacket(data []byte, length int, vlanID uint16) {
 						vlanMsg = fmt.Sprintf("VLAN %d", vlanID)
 					}
 					
-					msg := fmt.Sprintf("[ArpWatchdog] 🐶 ARP STORM DETECTED on %s! Rate: %d req/s (Limit: %d) - Throttling logs for 20s", 
-						vlanMsg, aw.packetCount, aw.cfg.MaxPPS)
+					// Copiamos el nombre para la goroutine
+					pName := protocolName
+					count := aw.packetCount
+
+					go func(v string, p string, c uint64) {
+						msg := fmt.Sprintf("[ArpWatchdog] 🐶 DISCOVERY STORM DETECTED!\n"+
+							"    PROTOCOL: %s\n"+
+							"    VLAN:     %s\n"+
+							"    RATE:     %d req/s (Limit: %d)\n"+
+							"    ACTION:   Check for scanning malware or loops.", 
+							p, v, c, aw.cfg.MaxPPS)
+						aw.notify.Alert(msg)
+					}(vlanMsg, pName, count)
 					
-					aw.notify.Alert(msg)
-					
-					// Marcamos el momento de la alerta
 					aw.lastAlert = now
 				}
 			}
-			
-			// Siempre reseteamos el contador cada segundo, hayamos alertado o no
 			aw.packetCount = 0
 			aw.lastReset = now
 		}
