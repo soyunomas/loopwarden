@@ -31,34 +31,60 @@ func NewEngine(cfg *config.AlgorithmConfig, notify *notifier.Notifier) *Engine {
 		algorithms: make([]Algorithm, 0),
 	}
 
-	// 1. EtherFuse (Payload Analysis)
+	// 1. EtherFuse (Passive Payload Analysis)
 	if cfg.EtherFuse.Enabled {
-		log.Println("✅ [Engine] Loaded Algorithm: EtherFuse (Passive Payload Analysis)")
+		log.Println("✅ [Engine] Loaded: EtherFuse")
 		e.algorithms = append(e.algorithms, NewEtherFuse(&cfg.EtherFuse, notify))
 	}
 
 	// 2. ActiveProbe (Injection)
 	if cfg.ActiveProbe.Enabled {
-		log.Println("✅ [Engine] Loaded Algorithm: ActiveProbe (Active Injection)")
+		log.Println("✅ [Engine] Loaded: ActiveProbe")
 		e.algorithms = append(e.algorithms, NewActiveProbe(&cfg.ActiveProbe, notify))
 	}
 
 	// 3. MacStorm (Velocity)
 	if cfg.MacStorm.Enabled {
-		log.Println("✅ [Engine] Loaded Algorithm: MacStorm (Passive MAC Velocity)")
+		log.Println("✅ [Engine] Loaded: MacStorm")
 		e.algorithms = append(e.algorithms, NewMacStorm(&cfg.MacStorm, notify))
 	}
 
-	// 4. FlapGuard (Topology Stability) - NUEVO
+	// 4. FlapGuard (Topology)
 	if cfg.FlapGuard.Enabled {
-		log.Println("✅ [Engine] Loaded Algorithm: FlapGuard (VLAN Hopping Detector)")
+		log.Println("✅ [Engine] Loaded: FlapGuard")
 		e.algorithms = append(e.algorithms, NewFlapGuard(&cfg.FlapGuard, notify))
 	}
 
-	// 5. ArpWatchdog (Protocol Storm) - NUEVO
+	// 5. ArpWatchdog (ARP Storm)
 	if cfg.ArpWatch.Enabled {
-		log.Println("✅ [Engine] Loaded Algorithm: ArpWatchdog (ARP Storm Detector)")
+		log.Println("✅ [Engine] Loaded: ArpWatchdog")
 		e.algorithms = append(e.algorithms, NewArpWatchdog(&cfg.ArpWatch, notify))
+	}
+
+	// --- NUEVOS MOTORES DE SEGURIDAD ---
+
+	// 6. DhcpHunter (Rogue DHCP)
+	if cfg.DhcpHunter.Enabled {
+		log.Println("✅ [Engine] Loaded: DhcpHunter (Rogue DHCP Detection)")
+		e.algorithms = append(e.algorithms, NewDhcpHunter(&cfg.DhcpHunter, notify))
+	}
+
+	// 7. FlowPanic (Pause Frame Flood)
+	if cfg.FlowPanic.Enabled {
+		log.Println("✅ [Engine] Loaded: FlowPanic (802.3x Pause Flood)")
+		e.algorithms = append(e.algorithms, NewFlowPanic(&cfg.FlowPanic, notify))
+	}
+
+	// 8. RaGuard (IPv6 RA Security)
+	if cfg.RaGuard.Enabled {
+		log.Println("✅ [Engine] Loaded: RaGuard (IPv6 Rogue RA)")
+		e.algorithms = append(e.algorithms, NewRaGuard(&cfg.RaGuard, notify))
+	}
+
+	// 9. McastPolicer (Multicast Storm)
+	if cfg.McastPolicer.Enabled {
+		log.Println("✅ [Engine] Loaded: McastPolicer (Multicast Rate Limiter)")
+		e.algorithms = append(e.algorithms, NewMcastPolicer(&cfg.McastPolicer, notify))
 	}
 
 	return e
@@ -73,13 +99,11 @@ func (e *Engine) StartAll(conn *packet.Conn, iface *net.Interface) {
 }
 
 func (e *Engine) DispatchPacket(data []byte, length int, vlanID uint16) {
-	// OPT(7): RLock permite lecturas concurrentes si fuera necesario, 
-	// aunque aquí protegemos la lista de algoritmos.
 	e.mu.RLock()
 	defer e.mu.RUnlock()
 	
+	// Data-oriented: Iterate over contiguous memory (slice of interfaces)
 	for _, algo := range e.algorithms {
-		// Pasamos el paquete a cada algoritmo activo
 		algo.OnPacket(data, length, vlanID)
 	}
 }
