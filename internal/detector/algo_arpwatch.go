@@ -10,6 +10,7 @@ import (
 	"github.com/mdlayher/packet"
 	"github.com/soyunomas/loopwarden/internal/config"
 	"github.com/soyunomas/loopwarden/internal/notifier"
+	"github.com/soyunomas/loopwarden/internal/telemetry" // IMPORTAR
 	"github.com/soyunomas/loopwarden/internal/utils"
 )
 
@@ -61,6 +62,7 @@ func (aw *ArpWatchdog) OnPacket(data []byte, length int, vlanID uint16) {
 	
 	isTargetProtocol := false
 	protocolName := ""
+	metricLabel := "Unknown"
 
 	// 1. Check ARP (IPv4)
 	if ethType == EtherTypeARP {
@@ -70,17 +72,17 @@ func (aw *ArpWatchdog) OnPacket(data []byte, length int, vlanID uint16) {
 			if opCode == OpCodeRequest {
 				isTargetProtocol = true
 				protocolName = "ARP (IPv4)"
+				metricLabel = "ArpStorm"
 			}
 		}
 	} else if ethType == EtherTypeIPv6 {
 		// 2. Check IPv6 Neighbor Discovery (via Multicast MAC prefix 33:33:ff)
-		// Es más rápido mirar la MAC de destino que parsear headers IPv6 + ICMPv6
-		// Neighbor Solicitation siempre va a 33:33:ff:xx:xx:xx
 		if length >= 6 {
 			dstMac := data[0:6]
 			if utils.IsIPv6NeighborDiscovery(dstMac) {
 				isTargetProtocol = true
 				protocolName = "NDP (IPv6 Neighbor Discovery)"
+				metricLabel = "NdpStorm"
 			}
 		}
 	}
@@ -94,6 +96,9 @@ func (aw *ArpWatchdog) OnPacket(data []byte, length int, vlanID uint16) {
 		if now.Sub(aw.lastReset) >= time.Second {
 			if aw.packetCount > aw.cfg.MaxPPS {
 				if now.Sub(aw.lastAlert) > ArpAlertCooldown {
+					
+					// TELEMETRY HIT
+					telemetry.EngineHits.WithLabelValues("ArpWatchdog", metricLabel).Inc()
 					
 					vlanMsg := "Native VLAN"
 					if vlanID != 0 {

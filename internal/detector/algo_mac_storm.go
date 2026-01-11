@@ -9,6 +9,7 @@ import (
 	"github.com/mdlayher/packet"
 	"github.com/soyunomas/loopwarden/internal/config"
 	"github.com/soyunomas/loopwarden/internal/notifier"
+	"github.com/soyunomas/loopwarden/internal/telemetry" // IMPORTAR
 	"github.com/soyunomas/loopwarden/internal/utils"
 )
 
@@ -90,12 +91,14 @@ func (ms *MacStorm) OnPacket(data []byte, length int, vlanID uint16) {
 	if newCount > ms.cfg.MaxPPSPerMac {
 		lastAlert, hasAlerted := ms.alertState[srcMac]
 		if !hasAlerted || time.Since(lastAlert) > MacAlertCooldown {
+			
+			// TELEMETRY HIT
+			telemetry.EngineHits.WithLabelValues("MacStorm", "HostFlood").Inc()
+			
 			ms.alertState[srcMac] = time.Now()
 			ms.mu.Unlock()
 			
 			// --- CAPTURA DE DESTINO PARA FORENSE ---
-			// Capturamos la MAC de destino del paquete actual que rompió el límite.
-			// Es una muestra estadística, pero muy precisa en inundaciones.
 			var dstMacSample [6]byte
 			copy(dstMacSample[:], data[0:6])
 			

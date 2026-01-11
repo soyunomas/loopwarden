@@ -1,7 +1,6 @@
 package detector
 
 import (
-
 	"encoding/binary"
 	"fmt"
 	"log"
@@ -12,6 +11,7 @@ import (
 	"github.com/mdlayher/packet"
 	"github.com/soyunomas/loopwarden/internal/config"
 	"github.com/soyunomas/loopwarden/internal/notifier"
+	"github.com/soyunomas/loopwarden/internal/telemetry" // IMPORTAR
 )
 
 const (
@@ -149,6 +149,9 @@ func (d *DhcpHunter) OnPacket(data []byte, length int, vlanID uint16) {
 			d.mu.Lock()
 			now := time.Now()
 			if now.Sub(d.lastAlert) > DhcpCooldown {
+				
+				// TELEMETRY HIT
+				telemetry.EngineHits.WithLabelValues("DhcpHunter", "RogueServer").Inc()
 				
 				// Copy data for goroutine
 				capturedSrcIP := srcIP.String()

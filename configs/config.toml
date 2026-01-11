@@ -89,3 +89,9 @@ chat_id = ""
     [algorithms.mcast_policer]
     enabled = true
     max_pps = 8000
+
+# --- TELEMETRÍA Y OBSERVABILIDAD ---
+# Expone métricas Prometheus en /metrics
+[telemetry]
+enabled = true
+listen_address = ":9090" # Ej: ":9090" (Todo), "127.0.0.1:9090" (Solo local)

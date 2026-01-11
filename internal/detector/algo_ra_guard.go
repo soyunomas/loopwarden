@@ -11,6 +11,7 @@ import (
 	"github.com/mdlayher/packet"
 	"github.com/soyunomas/loopwarden/internal/config"
 	"github.com/soyunomas/loopwarden/internal/notifier"
+	"github.com/soyunomas/loopwarden/internal/telemetry" // IMPORTAR
 )
 
 const (
@@ -87,6 +88,9 @@ func (r *RaGuard) OnPacket(data []byte, length int, vlanID uint16) {
 				now := time.Now()
 				if now.Sub(r.lastAlert) > RaAlertCooldown {
 					
+					// TELEMETRY HIT
+					telemetry.EngineHits.WithLabelValues("RaGuard", "RogueRA").Inc()
+
 					// Get Src IPv6 (Offset 8 in IPv6 header)
 					srcIP := net.IP(data[ethOffset+8 : ethOffset+24])
 					ipStr := srcIP.String()

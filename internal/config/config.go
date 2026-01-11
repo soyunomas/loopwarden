@@ -10,13 +10,22 @@ type Config struct {
 	Network    NetworkConfig   `toml:"network"`
 	Algorithms AlgorithmConfig `toml:"algorithms"`
 	Alerts     AlertsConfig    `toml:"alerts"`
+	Telemetry  TelemetryConfig `toml:"telemetry"` // Nueva sección
 }
 
+// --- TELEMETRY CONFIG ---
+type TelemetryConfig struct {
+	Enabled       bool   `toml:"enabled"`
+	ListenAddress string `toml:"listen_address"`
+}
+
+// --- NETWORK CONFIG ---
 type NetworkConfig struct {
 	Interface string `toml:"interface"`
 	SnapLen   int    `toml:"snaplen"`
 }
 
+// --- ALGORITHMS CONFIG ---
 type AlgorithmConfig struct {
 	EtherFuse    EtherFuseConfig    `toml:"etherfuse"`
 	ActiveProbe  ActiveProbeConfig  `toml:"active_probe"`
@@ -24,7 +33,7 @@ type AlgorithmConfig struct {
 	FlapGuard    FlapGuardConfig    `toml:"flap_guard"`
 	ArpWatch     ArpWatchConfig     `toml:"arp_watch"`
 	
-	// --- NUEVOS MOTORES ---
+	// Nuevos Motores
 	DhcpHunter   DhcpHunterConfig   `toml:"dhcp_hunter"`
 	FlowPanic    FlowPanicConfig    `toml:"flow_panic"`
 	RaGuard      RaGuardConfig      `toml:"ra_guard"`
@@ -61,8 +70,6 @@ type ArpWatchConfig struct {
 	MaxPPS  uint64 `toml:"max_pps"`
 }
 
-// --- NUEVAS CONFIGURACIONES ---
-
 type DhcpHunterConfig struct {
 	Enabled      bool     `toml:"enabled"`
 	TrustedMacs  []string `toml:"trusted_macs"`
@@ -84,6 +91,7 @@ type McastPolicerConfig struct {
 	MaxPPS  uint64 `toml:"max_pps"`
 }
 
+// --- ALERTS CONFIG ---
 type AlertsConfig struct {
 	SyslogServer string         `toml:"syslog_server"`
 	Webhook      WebhookConfig  `toml:"webhook"`

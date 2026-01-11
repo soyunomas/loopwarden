@@ -83,6 +83,22 @@ LoopWarden ejecuta **9 motores de detección concurrentes**. Cada uno busca una 
 
 ---
 
+### 📊 Telemetría y Observabilidad (Prometheus)
+
+LoopWarden expone de forma nativa un endpoint compatible con **Prometheus** en el puerto `:9090/metrics`. Esto permite visualizar la salud de la red y del propio motor de detección en tiempo real a través de Grafana, sin necesidad de agentes externos.
+
+*   **Forense de Capa 2:** Desglose granular del tráfico por protocolo (ARP, IPv4, IPv6, VLAN Tagged, LLDP) y tipo de transmisión (Broadcast vs Multicast). Permite identificar qué protocolo exacto está saturando el enlace.
+*   **Salud del Kernel (Zero-Blindness):** Monitoriza directamente los contadores de descarte del driver de red (`rx_dropped`). Si el Kernel descarta paquetes por saturación de buffer antes de que LoopWarden pueda leerlos, la métrica `loopwarden_socket_drops_total` lo revelará, garantizando que no existan puntos ciegos operativos.
+*   **Tendencias de Amenazas:** Contadores específicos para cada motor de detección (`EngineHits`). Permite correlacionar picos de CPU en los switches con tormentas ARP o bucles físicos detectados históricamente.
+*   **Perfilado de Latencia:** Histogramas de precisión de nanosegundos (`loopwarden_processing_ns`) que miden el tiempo que tarda cada paquete en atravesar los 9 motores de detección, validando el rendimiento "Fast-Path".
+
+**Verificación Rápida:**
+```bash
+curl http://localhost:9090/metrics
+```
+
+---
+
 ### 🔔 Notificaciones Inteligentes (Smart Silence)
 
 En una tormenta de broadcast, una red puede generar millones de eventos por segundo. Un sistema de alertas ingenuo tumbaría tu servidor de correo o bloquearía tu API de Slack. LoopWarden implementa **Higiene Operacional**:

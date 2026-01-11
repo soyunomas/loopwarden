@@ -9,6 +9,7 @@ import (
 	"github.com/mdlayher/packet"
 	"github.com/soyunomas/loopwarden/internal/config"
 	"github.com/soyunomas/loopwarden/internal/notifier"
+	"github.com/soyunomas/loopwarden/internal/telemetry" // IMPORTAR
 	"github.com/soyunomas/loopwarden/internal/utils"
 )
 
@@ -68,17 +69,15 @@ func (ef *EtherFuse) OnPacket(data []byte, length int, vlanID uint16) {
 		if now.Sub(ef.lastReset) >= time.Second {
 			if ef.packetsSec > ef.cfg.StormPPSLimit {
 				if now.Sub(ef.lastAlertTime) > 5*time.Second {
-					// Extraer ubicación para la alerta de tormenta
+					// METRICA AÑADIDA: Tormenta detectada
+					telemetry.EngineHits.WithLabelValues("EtherFuse", "GlobalStorm").Inc()
+					
 					loc := "Native"
 					if vlanID != 0 { loc = fmt.Sprintf("%d", vlanID) }
-					
-					// Copia de seguridad para la goroutine
 					pps := ef.packetsSec
-					
 					go func(l string, p uint64) {
 						ef.notify.Alert(fmt.Sprintf("[EtherFuse] ⛈️ GLOBAL STORM DETECTED! VLAN: %s | Rate: %d pps", l, p))
 					}(loc, pps)
-					
 					ef.lastAlertTime = now
 				}
 			}
@@ -87,7 +86,7 @@ func (ef *EtherFuse) OnPacket(data []byte, length int, vlanID uint16) {
 		}
 	}
 
-	// 2. Lógica de detección de bucle por repetición de hash
+	// 2. Lógica de detección de bucle
 	count := ef.lookupTable[sum]
 
 	if count > 0 {
@@ -97,11 +96,11 @@ func (ef *EtherFuse) OnPacket(data []byte, length int, vlanID uint16) {
 		if int(newCount) > ef.cfg.AlertThreshold {
 			if time.Since(ef.lastAlertTime) > 5*time.Second {
 				
-				// --- NUEVA LÓGICA CON PROTOCOL MAPPING ---
-				// Extraemos los datos raw ahora (Hot Path copy) para procesarlos después
+				// METRICA AÑADIDA: Bucle detectado
+				telemetry.EngineHits.WithLabelValues("EtherFuse", "LoopDetected").Inc()
+
 				var dstMacBytes, srcMacBytes []byte
 				if length >= 12 {
-					// Copia defensiva (slice header)
 					dstMacBytes = make([]byte, 6)
 					srcMacBytes = make([]byte, 6)
 					copy(dstMacBytes, data[0:6])
@@ -113,9 +112,7 @@ func (ef *EtherFuse) OnPacket(data []byte, length int, vlanID uint16) {
 					vlanStr = fmt.Sprintf("%d", vlanID)
 				}
 
-				// Disparamos Goroutine para el análisis de protocolo (Cold Path)
 				go func(v string, sMac, dMac []byte, h uint64, reps uint8) {
-					// Clasificación forense
 					targetInfo := utils.ClassifyMAC(dMac)
 					impact := "User Traffic"
 					if targetInfo.IsCritical {
@@ -139,11 +136,9 @@ func (ef *EtherFuse) OnPacket(data []byte, length int, vlanID uint16) {
 
 				ef.lastAlertTime = time.Now()
 			}
-			// Reset para evitar spam del mismo paquete
 			ef.lookupTable[sum] = 0
 		}
 	} else {
-		// Nuevo hash, actualizar ring buffer
 		oldHash := ef.ringBuffer[ef.writeCursor]
 		if oldHash != 0 {
 			delete(ef.lookupTable, oldHash)

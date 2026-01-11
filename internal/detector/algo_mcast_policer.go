@@ -9,6 +9,7 @@ import (
 	"github.com/mdlayher/packet"
 	"github.com/soyunomas/loopwarden/internal/config"
 	"github.com/soyunomas/loopwarden/internal/notifier"
+	"github.com/soyunomas/loopwarden/internal/telemetry" // IMPORTAR
 )
 
 type McastPolicer struct {
@@ -55,6 +56,9 @@ func (mp *McastPolicer) OnPacket(data []byte, length int, vlanID uint16) {
 		if now.Sub(mp.lastReset) >= time.Second {
 			if mp.packetCount > mp.cfg.MaxPPS {
 				if now.Sub(mp.lastAlert) > 10*time.Second {
+					
+					// TELEMETRY HIT
+					telemetry.EngineHits.WithLabelValues("McastPolicer", "MulticastStorm").Inc()
 					
 					pps := mp.packetCount
 					go func(count uint64, vlan uint16) {
