@@ -9,7 +9,7 @@
 
 ## 🚀 Características Principales
 
-LoopWarden ejecuta 5 motores de detección concurrentes. Cada uno busca una "firma" específica de fallo en la red:
+LoopWarden ejecuta **9 motores de detección concurrentes**. Cada uno busca una "firma" específica de fallo o amenaza en la red:
 
 ### 1. ActiveProbe (Inyección Activa Determinista) ⚡
 *El "Sonar" de la red. La única forma de tener 100% de certeza.*
@@ -52,6 +52,36 @@ LoopWarden ejecuta 5 motores de detección concurrentes. Cada uno busca una "fir
 *   **🛡️ Lógica de Detección:** Los bucles de capa 2 amplifican el tráfico Broadcast. Como ARP es el protocolo de broadcast más común y vital, es el primero en saturarse. ArpWatchdog alerta cuando la tasa global de peticiones ARP se vuelve anormal.
 *   **💡 Valor Diferencial:** Protege la CPU de los switches y routers. Una tormenta ARP es lo que suele "matar" la conectividad incluso antes de que el enlace se sature por ancho de banda, ya que la CPU del router no puede procesar tantas peticiones.
 *   **Caso de Uso:** Detectar el inicio de una tormenta (Broadcast Radiation) segundos antes de que la red se vuelva inutilizable, dando tiempo a reaccionar.
+
+### 6. DhcpHunter (Cazador de Rogue DHCP) 🦈
+*Seguridad contra Man-in-the-Middle.*
+
+*   **🔬 Mecánica:** Analiza paquetes UDP (Puerto 67/68) en busca de ofertas DHCP (`DHCPOFFER`, `DHCPACK`). Verifica la MAC de origen y la IP (CIDR) contra una lista blanca.
+*   **🛡️ Lógica de Detección:** Si un servidor desconocido ofrece una IP a un cliente, es inmediatamente marcado como Rogue.
+*   **Caso de Uso:** Un usuario conecta un router doméstico (TP-Link/D-Link) a la red corporativa, empezando a asignar IPs falsas a los empleados y cortando su acceso a internet.
+
+### 7. FlowPanic (Detección de Pausas 802.3x) ⏸️
+*Monitorización de salud física y DoS.*
+
+*   **🔬 Mecánica:** Rastrea tramas de control Ethernet (`0x8808`) específicamente con OpCode `PAUSE` (`0x0001`).
+*   **🛡️ Lógica de Detección:** Las tramas PAUSE detienen la transmisión del switch. Una inundación de estas tramas es un síntoma de fallo hardware grave en una NIC o un ataque de denegación de servicio.
+*   **Caso de Uso:** Una tarjeta de red antigua falla y empieza a gritar "PAUSE" a la red, congelando el tráfico de todo un segmento sin saturar el ancho de banda.
+
+### 8. RaGuard (IPv6 Router Advertisement Guard) 📡
+*Protección de infraestructura IPv6.*
+
+*   **🔬 Mecánica:** Inspecciona paquetes ICMPv6 (`NextHeader 58`) buscando mensajes "Router Advertisement" (Type 134).
+*   **🛡️ Lógica de Detección:** Solo permite RAs provenientes de las MACs de los routers Core autorizados.
+*   **Caso de Uso:** Windows y dispositivos móviles se autoconfiguran con cualquier RA que escuchen. Un atacante (o un PC mal configurado) puede anunciarse como router IPv6 y capturar todo el tráfico.
+
+### 9. McastPolicer (Control de Tormentas Multicast) 👻
+*Gestión de clonación y streaming.*
+
+*   **🔬 Mecánica:** Diferencia tráfico Multicast (IPv4 `01:00:5E...` / IPv6 `33:33...`) del Broadcast general.
+*   **🛡️ Lógica de Detección:** Aplica límites de velocidad específicos para tráfico Multicast.
+*   **Caso de Uso:** Software de clonación de aulas (FOG Project, Clonezilla) mal configurado que inunda la red, o cámaras de videovigilancia generando tormentas.
+
+---
 
 ### 🔔 Notificaciones Inteligentes (Smart Silence)
 
@@ -103,6 +133,15 @@ A continuación se detallan todos los parámetros disponibles en el archivo de c
 | | `threshold` | `5` | Número de cambios de VLAN permitidos por segundo para una misma MAC. |
 | **[algorithms.arp_watch]** | `enabled` | `true` | Activa/Desactiva la monitorización específica de ARP. |
 | | `max_pps` | `500` | Límite global de peticiones ARP (`WHO-HAS`) por segundo en toda la interfaz. |
+| **[algorithms.dhcp_hunter]** | `enabled` | `true` | Detección de servidores DHCP Rogue. |
+| | `trusted_macs` | `[]` | Lista de MACs autorizadas para enviar DHCPOFFER. |
+| | `trusted_cidrs` | `[]` | Lista de redes (CIDR) autorizadas para enviar ofertas DHCP (ej: `["10.0.0.0/8"]`). |
+| **[algorithms.flow_panic]** | `enabled` | `true` | Detección de inundación de tramas PAUSE (802.3x). |
+| | `max_pause_pps` | `50` | Máximo de tramas de pausa por segundo antes de alertar fallo hardware/DoS. |
+| **[algorithms.ra_guard]** | `enabled` | `true` | Protección contra Rogue IPv6 Router Advertisements. |
+| | `trusted_macs` | `[]` | Únicas MACs permitidas para actuar como Router IPv6. |
+| **[algorithms.mcast_policer]**| `enabled` | `true` | Control de tráfico Multicast. |
+| | `max_pps` | `8000` | Límite global de paquetes multicast por segundo (Video/Clonación). |
 
 ## 🚨 Playbook de Respuesta a Incidentes
 
@@ -110,10 +149,13 @@ Guía de actuación rápida para operadores de red (NOC) ante alertas críticas 
 
 | Alerta Recibida | Causa Probable | Acción Recomendada |
 | :--- | :--- | :--- |
-| **ActiveProbe:**<br>`LOOP CONFIRMED` | **Bucle Físico Cerrado (Hard Loop).**<br>Un cable conecta dos puertos del mismo dominio de broadcast (mismo switch o switches interconectados) y STP no lo ha bloqueado (ej: Switches "tontos" no gestionados). | **ACCION INMEDIATA (CRÍTICO)**<br>1. El bucle es físico y total. La red caerá en segundos.<br>2. Revisa los últimos cables conectados o cambios en el patch-panel.<br>3. Desconecta enlaces redundantes hasta que cese la alerta. |
-| **MacStorm:**<br>`MAC VELOCITY ALERT` | **Host Inundador.**<br>Una tarjeta de red averiada ("Jabbering NIC"), un virus haciendo escaneo masivo, o un bucle local detrás de un dispositivo de borde (ej: Teléfono VoIP con el puerto PC conectado al muro). | **AISLAR Y APAGAR**<br>1. Copia la MAC de la alerta.<br>2. Búscala en el switch: `show mac address-table address <MAC>`.<br>3. Identifica el puerto físico y apágalo administrativamente (`shutdown`). |
-| **FlapGuard:**<br>`MAC FLAPPING` | **Inestabilidad de Topología.**<br>Un cable está puenteando físicamente dos VLANs distintas (ej: puerto VLAN 10 conectado a puerto VLAN 20), o un Trunk tiene una configuración de VLAN nativa errónea. | **INVESTIGAR CABLEADO**<br>1. Rastrea la MAC para ver entre qué puertos o switches está "saltando".<br>2. Verifica el cableado físico en el armario de comunicaciones.<br>3. Comprueba configuraciones de "Native VLAN" en los Trunks. |
-| **ArpWatchdog:**<br>`ARP STORM` | **Tormenta de Plano de Control.**<br>Suele ser el primer síntoma de un bucle (amplificación de broadcast) o un ataque de escaneo de red. Pone en riesgo la CPU de los Routers/Core. | **CORRELACIONAR**<br>1. Si aparece junto a alertas de *EtherFuse* o *ActiveProbe*, es un bucle: prioriza buscar el cable físico.<br>2. Si aparece sola, es un host infectado o mal configurado: localízalo por MAC y aíslalo. |
+| **ActiveProbe:**<br>`LOOP CONFIRMED` | **Bucle Físico Cerrado (Hard Loop).**<br>Un cable conecta dos puertos del mismo dominio de broadcast y STP no lo ha bloqueado. | **ACCION INMEDIATA (CRÍTICO)**<br>1. El bucle es físico y total. La red caerá en segundos.<br>2. Revisa los últimos cables conectados.<br>3. Desconecta enlaces redundantes hasta que cese la alerta. |
+| **MacStorm:**<br>`MAC VELOCITY ALERT` | **Host Inundador.**<br>Tarjeta de red averiada ("Jabbering NIC"), virus o bucle local. | **AISLAR Y APAGAR**<br>1. Copia la MAC de la alerta.<br>2. Búscala en el switch: `show mac address-table address <MAC>`.<br>3. Apaga el puerto (`shutdown`). |
+| **FlapGuard:**<br>`MAC FLAPPING` | **Inestabilidad de Topología.**<br>Un cable puenteando dos VLANs o error de Native VLAN. | **INVESTIGAR CABLEADO**<br>1. Rastrea la MAC para ver entre qué puertos salta.<br>2. Verifica "Native VLAN" en Trunks. |
+| **ArpWatchdog:**<br>`ARP STORM` | **Tormenta de Plano de Control.**<br>Síntoma temprano de bucle o escaneo masivo. | **CORRELACIONAR**<br>1. Si aparece con *EtherFuse*, es un bucle.<br>2. Si aparece sola, es un host infectado: localízalo y aíslalo. |
+| **DhcpHunter:**<br>`ROGUE DHCP` | **Router doméstico conectado.**<br>Alguien conectó un router TP-Link/D-Link por el puerto LAN. | **BLOQUEO INMEDIATO**<br>La MAC reportada es el puerto del router intruso. Bloquea ese puerto en el switch o usa *BPDU Guard*. |
+| **FlowPanic:**<br>`PAUSE FLOOD` | **Fallo Hardware / DoS.**<br>NIC muriendo o ataque de denegación de servicio a nivel L2. | **REEMPLAZO**<br>El dispositivo origen está defectuoso. Desconéctalo antes de que congele el switch entero. |
+| **RaGuard:**<br>`ROGUE IPV6 RA` | **MITM IPv6.**<br>Un PC mal configurado o atacante se anuncia como Gateway IPv6. | **SEGURIDAD**<br>Investiga la MAC origen. Puede ser un intento de interceptar tráfico mediante autoconfiguración IPv6. |
 
 ## 🛠️ Instalación y Uso
 
@@ -200,7 +242,7 @@ LoopWarden está diseñado para procesar tráfico a velocidad de línea sin ahog
       ||
 [ KERNEL RING ] <--- (AF_PACKET RX_RING)
       ||
-[ BPF FILTER ]  <--- "Drop Unicast. Keep Broadcast/Multicast/ARP/Tagged"
+[ BPF FILTER ]  <--- "Drop Unicast. Keep Broadcast/Multicast/ARP/Tagged/Control"
       ||
 [ GO RUNTIME ]  <--- (Zero-Copy Read)
       ||
@@ -211,12 +253,20 @@ LoopWarden está diseñado para procesar tráfico a velocidad de línea sin ahog
              +-- 3. MacStorm (Velocity Check)
              +-- 4. FlapGuard (Topology Check)
              +-- 5. ArpWatchdog (Protocol Check)
+             +-- 6. DhcpHunter (Rogue Server Check)
+             +-- 7. FlowPanic (PAUSE Frame Check)
+             +-- 8. RaGuard (IPv6 RA Check)
+             +-- 9. McastPolicer (Multicast Rate)
              ||
 [ NOTIFIER ] <-- (Global Deduplication & Throttling)
       ||
 [ ALERTS ] ----> Slack / Syslog / Email
 ```
 
+> **⚠️ Nota Técnica sobre Visibilidad (Unicast vs Broadcast):**
+> Para garantizar un rendimiento extremo y proteger la CPU en enlaces de 10Gbps, LoopWarden aplica un filtro BPF estricto en el Kernel que **descarta todo el tráfico Unicast general**.
+>
+> Esto implica un compromiso de diseño: los motores de seguridad (como *DhcpHunter* o *MacStorm*) detectan amenazas que impactan el dominio de difusión global (Broadcast/Multicast). Un ataque dirigido estrictamente Unicast (ej: un DHCP Offer enviado directamente a la MAC del cliente sin usar broadcast, o un DoS UDP hacia una sola IP) será descartado por el Kernel para preservar recursos. LoopWarden prioriza la estabilidad de la Capa 2 (bucles y tormentas) sobre la inspección profunda (DPI) de tráfico usuario a usuario.
 
 
 ## 📜 Licencia

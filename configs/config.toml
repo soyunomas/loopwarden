@@ -37,8 +37,8 @@ chat_id = ""
     [algorithms.etherfuse]
     enabled = true
     history_size = 4096
-    alert_threshold = 50
-    storm_pps_limit = 5000
+    alert_threshold = 200
+    storm_pps_limit = 15000
 
     # --- ALGORITMO 2: ActiveProbe ---
     [algorithms.active_probe]
@@ -46,6 +46,7 @@ chat_id = ""
     interval_ms = 1000
     ethertype = 65535
     magic_payload = "LOOPWARDEN_PROBE"
+    target_mac = "" # Opcional: "FF:FF:FF:FF:FF:FF" para broadcast, o una MAC unicast específica.
 
     # --- ALGORITMO 3: MAC Storm ---
     [algorithms.mac_storm]
@@ -61,3 +62,30 @@ chat_id = ""
     [algorithms.arp_watch]
     enabled = true
     max_pps = 500
+
+    # --- ALGORITMO 6: DhcpHunter ---
+    # Detecta servidores DHCP no autorizados.
+    [algorithms.dhcp_hunter]
+    enabled = true
+    # MACs de tus servidores DHCP legítimos (Ej: Gateway, Windows Server)
+    trusted_macs = ["00:15:5d:01:02:03", "aa:bb:cc:dd:ee:ff"] 
+    # Rangos de IP desde donde es válido recibir DHCP Offers.
+    trusted_cidrs = ["192.168.1.0/24", "10.0.0.0/8"]
+
+    # --- ALGORITMO 7: FlowPanic ---
+    # Detecta inundación de tramas PAUSE (802.3x), síntoma de NIC averiada o saturación.
+    [algorithms.flow_panic]
+    enabled = true
+    max_pause_pps = 50 # 50/segundo es muy alto para tráfico normal.
+
+    # --- ALGORITMO 8: RaGuard ---
+    # Detecta Routers IPv6 no autorizados (protección contra MITM en IPv6).
+    [algorithms.ra_guard]
+    enabled = true
+    trusted_macs = ["aa:bb:cc:dd:ee:ff"] # Solo la MAC del Gateway/Firewall.
+
+    # --- ALGORITMO 9: McastPolicer ---
+    # Limita el tráfico Multicast global (ej: streaming, clonación).
+    [algorithms.mcast_policer]
+    enabled = true
+    max_pps = 8000

@@ -18,11 +18,17 @@ type NetworkConfig struct {
 }
 
 type AlgorithmConfig struct {
-	EtherFuse   EtherFuseConfig   `toml:"etherfuse"`
-	ActiveProbe ActiveProbeConfig `toml:"active_probe"`
-	MacStorm    MacStormConfig    `toml:"mac_storm"`
-	FlapGuard   FlapGuardConfig   `toml:"flap_guard"`
-	ArpWatch    ArpWatchConfig    `toml:"arp_watch"`
+	EtherFuse    EtherFuseConfig    `toml:"etherfuse"`
+	ActiveProbe  ActiveProbeConfig  `toml:"active_probe"`
+	MacStorm     MacStormConfig     `toml:"mac_storm"`
+	FlapGuard    FlapGuardConfig    `toml:"flap_guard"`
+	ArpWatch     ArpWatchConfig     `toml:"arp_watch"`
+	
+	// --- NUEVOS MOTORES ---
+	DhcpHunter   DhcpHunterConfig   `toml:"dhcp_hunter"`
+	FlowPanic    FlowPanicConfig    `toml:"flow_panic"`
+	RaGuard      RaGuardConfig      `toml:"ra_guard"`
+	McastPolicer McastPolicerConfig `toml:"mcast_policer"`
 }
 
 type EtherFuseConfig struct {
@@ -37,6 +43,7 @@ type ActiveProbeConfig struct {
 	IntervalMs   int    `toml:"interval_ms"`
 	Ethertype    uint16 `toml:"ethertype"`
 	MagicPayload string `toml:"magic_payload"`
+	TargetMAC    string `toml:"target_mac"`
 }
 
 type MacStormConfig struct {
@@ -54,15 +61,34 @@ type ArpWatchConfig struct {
 	MaxPPS  uint64 `toml:"max_pps"`
 }
 
-// --- CONFIGURACIÓN DE ALERTAS (100% ESTRUCTURADA) ---
+// --- NUEVAS CONFIGURACIONES ---
+
+type DhcpHunterConfig struct {
+	Enabled      bool     `toml:"enabled"`
+	TrustedMacs  []string `toml:"trusted_macs"`
+	TrustedCidrs []string `toml:"trusted_cidrs"`
+}
+
+type FlowPanicConfig struct {
+	Enabled     bool `toml:"enabled"`
+	MaxPausePPS uint64 `toml:"max_pause_pps"`
+}
+
+type RaGuardConfig struct {
+	Enabled     bool     `toml:"enabled"`
+	TrustedMacs []string `toml:"trusted_macs"`
+}
+
+type McastPolicerConfig struct {
+	Enabled bool   `toml:"enabled"`
+	MaxPPS  uint64 `toml:"max_pps"`
+}
 
 type AlertsConfig struct {
-	SyslogServer string `toml:"syslog_server"` // Syslog se mantiene simple (opcional cambiarlo)
-
-	// Ahora todos son objetos consistentes
-	Webhook  WebhookConfig  `toml:"webhook"`
-	Smtp     SmtpConfig     `toml:"smtp"`
-	Telegram TelegramConfig `toml:"telegram"`
+	SyslogServer string         `toml:"syslog_server"`
+	Webhook      WebhookConfig  `toml:"webhook"`
+	Smtp         SmtpConfig     `toml:"smtp"`
+	Telegram     TelegramConfig `toml:"telegram"`
 }
 
 type WebhookConfig struct {
