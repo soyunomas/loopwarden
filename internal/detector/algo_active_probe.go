@@ -12,6 +12,7 @@ import (
 	"github.com/mdlayher/packet"
 	"github.com/soyunomas/loopwarden/internal/config"
 	"github.com/soyunomas/loopwarden/internal/notifier"
+	"github.com/soyunomas/loopwarden/internal/telemetry" // IMPORTAR
 	"github.com/soyunomas/loopwarden/internal/utils"
 )
 
@@ -97,6 +98,9 @@ func (ap *ActiveProbe) OnPacket(data []byte, length int, vlanID uint16) {
 				now := time.Now()
 				if now.Sub(ap.lastAlert) > ProbeAlertCooldown {
 					
+					// TELEMETRY: HARD LOOP DETECTED
+					telemetry.EngineHits.WithLabelValues("ActiveProbe", "HardLoop").Inc()
+
 					// Capturamos DST MAC para ver si regresó como broadcast o unicast
 					dstMac := data[0:6]
 					

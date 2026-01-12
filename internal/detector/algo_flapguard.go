@@ -9,6 +9,7 @@ import (
 	"github.com/mdlayher/packet"
 	"github.com/soyunomas/loopwarden/internal/config"
 	"github.com/soyunomas/loopwarden/internal/notifier"
+	"github.com/soyunomas/loopwarden/internal/telemetry" // IMPORTAR
 	"github.com/soyunomas/loopwarden/internal/utils"
 )
 
@@ -108,6 +109,9 @@ func (fg *FlapGuard) OnPacket(data []byte, length int, vlanID uint16) {
 			if (now - entry.lastAlert) > FlapCooldownNano {
 				entry.lastAlert = now
 				
+				// TELEMETRY HIT
+				telemetry.EngineHits.WithLabelValues("FlapGuard", "MacFlapping").Inc()
+
 				fg.registry[srcMac] = entry
 				fg.mu.Unlock()
 				

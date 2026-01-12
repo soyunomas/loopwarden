@@ -7,17 +7,17 @@ import (
 	"net"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/mdlayher/packet"
 	"golang.org/x/net/bpf"
-	
+
 	"github.com/soyunomas/loopwarden/internal/config"
 	"github.com/soyunomas/loopwarden/internal/detector"
+	"github.com/soyunomas/loopwarden/internal/telemetry"
 )
 
 // Run inicia la captura de paquetes a nivel de socket RAW.
-// Esta función bloquea hasta que recibe la señal de parada, pero el procesamiento
-// ocurre en una goroutine separada.
 func Run(cfg *config.Config, engine *detector.Engine, stopChan chan os.Signal) error {
 	// 1. Obtener interfaz física
 	ifi, err := net.InterfaceByName(cfg.Network.Interface)
@@ -26,7 +26,6 @@ func Run(cfg *config.Config, engine *detector.Engine, stopChan chan os.Signal) e
 	}
 
 	// 2. Abrir Socket Raw (AF_PACKET)
-	// ETH_P_ALL (htons(3)) para capturar todo, pero filtraremos con BPF.
 	conn, err := packet.Listen(ifi, packet.Raw, 3, nil)
 	if err != nil {
 		return fmt.Errorf("failed to open raw socket: %w", err)
@@ -37,22 +36,18 @@ func Run(cfg *config.Config, engine *detector.Engine, stopChan chan os.Signal) e
 	engine.StartAll(conn, ifi)
 
 	// 4. Promiscuous Mode
-	// Necesario para ver tráfico que no es para nuestra MAC (ej: bucles de otros)
 	if err := conn.SetPromiscuous(true); err != nil {
 		log.Printf("Warning: Failed to set promiscuous mode on %s: %v", cfg.Network.Interface, err)
 	}
 
-	// 5. BPF Filter (Berkeley Packet Filter) - OPTIMIZACIÓN KERNEL SIDE
-	// Este filtro se ejecuta en el Kernel. Solo deja pasar al user-space (nuestra app)
-	// los paquetes que sean Broadcast o Multicast.
-	// Esto reduce drásticamente el Context Switching y la carga de CPU.
-	// Logic: "Load byte 0 (Dst Addr[0]) AND 1". If result != 0, it's Multicast/Broadcast.
+	// 5. BPF Filter (Optimización Kernel Side)
+	// Solo deja pasar Broadcast y Multicast al user-space.
 	filter, err := bpf.Assemble([]bpf.Instruction{
-		bpf.LoadAbsolute{Off: 0, Size: 1},           
-		bpf.ALUOpConstant{Op: bpf.ALUOpAnd, Val: 1}, 
-		bpf.JumpIf{Cond: bpf.JumpEqual, Val: 0, SkipTrue: 1}, 
-		bpf.RetConstant{Val: uint32(cfg.Network.SnapLen)}, // Keep packet
-		bpf.RetConstant{Val: 0},                     // Drop packet
+		bpf.LoadAbsolute{Off: 0, Size: 1},
+		bpf.ALUOpConstant{Op: bpf.ALUOpAnd, Val: 1},
+		bpf.JumpIf{Cond: bpf.JumpEqual, Val: 0, SkipTrue: 1},
+		bpf.RetConstant{Val: uint32(cfg.Network.SnapLen)}, // Keep
+		bpf.RetConstant{Val: 0},                           // Drop
 	})
 	if err != nil {
 		return fmt.Errorf("BPF assembly failed: %w", err)
@@ -64,49 +59,77 @@ func Run(cfg *config.Config, engine *detector.Engine, stopChan chan os.Signal) e
 
 	log.Printf("🛡️  Sniffer active on %s [BPF: Multicast/Broadcast Only]", cfg.Network.Interface)
 
+	// --- 5.5 MONITOR DE SALUD DEL KERNEL (Background) ---
+	// Verifica si el buffer del kernel se desborda (Drops).
+	// Se hace en goroutine para no invocar Syscalls en el hot-loop.
+	go func() {
+		ticker := time.NewTicker(5 * time.Second)
+		defer ticker.Stop()
+		// CORRECCIÓN: Usamos uint32 porque packet.Stats.Drops es uint32
+		var lastDrops uint32 = 0
+
+		for {
+			select {
+			case <-stopChan:
+				return
+			case <-ticker.C:
+				stats, err := conn.Stats()
+				if err == nil {
+					if stats.Drops > lastDrops {
+						delta := stats.Drops - lastDrops
+						telemetry.SocketDrops.Add(float64(delta))
+						// Opcional: Loguear si hay drops masivos
+						if delta > 100 {
+							log.Printf("⚠️ KERNEL DROPS DETECTED: %d packets lost (Buffer Full)", delta)
+						}
+						lastDrops = stats.Drops
+					}
+				}
+			}
+		}
+	}()
+
 	// 6. Loop de Lectura (Hot Path)
 	go func() {
-		// Alloc fuera del loop: Zero-Allocation durante la ejecución.
+		// Zero-Alloc: Buffer reutilizable
 		buf := make([]byte, cfg.Network.SnapLen)
-		
+
 		for {
-			// ReadFrom bloquea hasta que hay un paquete.
-			// 'n' es el número de bytes leídos.
 			n, _, err := conn.ReadFrom(buf)
 			if err != nil {
-				// Si el error es por cierre de conexión (al apagar), salimos limpio.
 				if strings.Contains(err.Error(), "closed") {
 					return
 				}
 				log.Printf("⚠️ Error reading packet: %v", err)
 				continue
 			}
-			
-			// --- VLAN PARSING (802.1Q) ---
-			// OPTIMIZACIÓN: Parseo inline manual para evitar overhead de funciones.
+
+			// --- INICIO CRONÓMETRO DE LATENCIA ---
+			start := time.Now()
+
+			// --- A. TELEMETRÍA (Observabilidad) ---
+			// Analizamos el paquete antes de cualquier otra cosa.
+			telemetry.TrackPacket(buf[:n], n)
+
+			// --- B. PARSING VLAN (Optimizado) ---
 			var vlanID uint16 = 0
-			
-			// Header Ethernet mínimo son 14 bytes.
-			// Si tiene VLAN tag, son 18 bytes.
 			if n >= 18 {
-				// Bytes 12 y 13 en Ethernet frame estándar es el EtherType.
-				// Si es 0x8100, es un Tag 802.1Q.
+				// Inline binary check
 				etherType := binary.BigEndian.Uint16(buf[12:14])
-				
-				if etherType == 0x8100 { 
-					// Bytes 14 y 15 son el TCI (Tag Control Information).
-					// Mask 0x0FFF extrae los 12 bits del ID.
+				if etherType == 0x8100 {
 					vlanID = binary.BigEndian.Uint16(buf[14:16]) & 0x0FFF
 				}
 			}
 
-			// Pasar copia segura al motor (Dispatch)
-			// Engine se encarga de distribuir a los workers.
+			// --- C. DISPATCH (Motor) ---
 			engine.DispatchPacket(buf[:n], n, vlanID)
+
+			// --- FIN CRONÓMETRO ---
+			duration := time.Since(start).Nanoseconds()
+			telemetry.ProcessingTime.Observe(float64(duration))
 		}
 	}()
 
-	// Esperar señal de terminación (Ctrl+C)
 	<-stopChan
 	return nil
 }

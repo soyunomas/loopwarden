@@ -10,6 +10,7 @@ import (
 	"github.com/mdlayher/packet"
 	"github.com/soyunomas/loopwarden/internal/config"
 	"github.com/soyunomas/loopwarden/internal/notifier"
+	"github.com/soyunomas/loopwarden/internal/telemetry" // IMPORTAR
 )
 
 const (
@@ -69,6 +70,9 @@ func (fp *FlowPanic) OnPacket(data []byte, length int, vlanID uint16) {
 				if fp.packetCount > fp.cfg.MaxPausePPS {
 					if now.Sub(fp.lastAlert) > PauseAlertCooldown {
 						
+						// TELEMETRY HIT
+						telemetry.EngineHits.WithLabelValues("FlowPanic", "PauseFlood").Inc()
+
 						count := fp.packetCount
 						srcMac := net.HardwareAddr(data[6:12]).String()
 						
