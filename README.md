@@ -9,78 +9,97 @@
 
 ## 🚀 Características Principales
 
-LoopWarden ejecuta **9 motores de detección concurrentes**. Cada uno busca una "firma" específica de fallo o amenaza en la red:
+LoopWarden ejecuta **9 motores de detección concurrentes**. Cada uno busca una "firma" específica de fallo o amenaza en la red, proporcionando una visibilidad completa de Capa 2:
 
 ### 1. ActiveProbe (Inyección Activa Determinista) ⚡
 *El "Sonar" de la red. La única forma de tener 100% de certeza.*
 
 *   **🔬 Mecánica:** LoopWarden genera e inyecta una trama Ethernet unicast especialmente diseñada (con un EtherType `0xFFFF` configurable y un payload "mágico") cada segundo.
 *   **🛡️ Lógica de Detección:** Si esta trama, que salió por la interfaz `TX`, regresa a la interfaz `RX`, existe un camino físico cerrado sin lugar a dudas.
-*   **💡 Valor Diferencial:** A diferencia de los métodos pasivos que "deducen" un bucle por volumen de tráfico, ActiveProbe lo **confirma físicamente**. Es inmune a falsos positivos causados por tráfico legítimo de alta carga (backups, streaming).
-*   **Caso de Uso:** Detectar un cable de parcheo conectado por error entre dos bocas del mismo switch o entre dos switches troncales donde STP ha fallado o está desactivado.
+*   **💡 Valor Diferencial:** A diferencia de los métodos pasivos que "deducen" un bucle por volumen de tráfico, ActiveProbe lo **confirma físicamente**. Es inmune a falsos positivos causados por tráfico legítimo de alta carga.
+*   **🎯 Qué detecta:**
+    *   ✅ **Bucles Físicos (Hard Loops):** Cable de parcheo conectado por error (boca a boca).
+    *   ✅ **Fallos de STP:** Switches donde Spanning Tree ha fallado o tarda en converger.
 
 ### 2. EtherFuse (Análisis Pasivo de Payload) 🧬
 *Detección de "rebotes" mediante huella digital criptográfica.*
 
-*   **🔬 Mecánica:** Inspecciona pasivamente el tráfico Broadcast/Multicast entrante. Calcula un hash ultrarrápido (FNV-1a) del contenido (payload) de la trama, ignorando cabeceras cambiantes. Almacena estos hashes en un buffer circular en memoria.
+*   **🔬 Mecánica:** Inspecciona pasivamente el tráfico Broadcast/Multicast entrante. Calcula un hash ultrarrápido (FNV-1a) del contenido (payload) de la trama. Almacena estos hashes en un buffer circular.
 *   **🛡️ Lógica de Detección:** Si el sistema observa el mismo hash `N` veces en una ventana de tiempo de milisegundos, significa que la trama está "orbitando" la red infinitamente.
 *   **💡 Valor Diferencial:** Capaz de detectar bucles **remotos**. Aunque el bucle no esté en tu switch local, recibirás la onda expansiva de los paquetes duplicados.
-*   **Caso de Uso:** Identificar bucles ocurriendo aguas abajo (ej: en un switch no gestionado bajo la mesa de un usuario) que están rebotando tráfico hacia el Core.
+*   **🎯 Qué detecta:**
+    *   ✅ **Bucles Remotos (Soft Loops):** Bucles en switches no gestionados aguas abajo.
+    *   ✅ **Rebotes de Señal:** Paquetes duplicados por errores de configuración en enlaces redundantes.
 
 ### 3. MacStorm (Velocidad y Volumetría por Host) 🌪️
 *Aislamiento de la fuente del problema.*
 
-*   **🔬 Mecánica:** Mantiene una tabla de estado en tiempo real que rastrea los Paquetes Por Segundo (PPS) generados por cada dirección MAC origen única (Source MAC).
-*   **🛡️ Lógica de Detección:** Aplica un límite de velocidad (Rate Limiting) lógico. Si una MAC individual supera el umbral definido (ej: 2000 pps), se marca como host hostil.
-*   **💡 Valor Diferencial:** No solo te dice "hay un problema", te dice **quién** es el problema. Convierte una alerta genérica en una acción precisa ("Apagar el puerto donde está la MAC `AA:BB:CC...`").
-*   **Caso de Uso:** Tarjetas de red (NICs) averiadas que entran en "jabbering", virus que intentan escanear la red local, o bucles detrás de teléfonos VoIP.
+*   **🔬 Mecánica:** Mantiene una tabla de estado en tiempo real que rastrea los Paquetes Por Segundo (PPS) generados por cada dirección MAC origen única.
+*   **🛡️ Lógica de Detección:** Aplica un límite de velocidad (Rate Limiting) lógico. Si una MAC individual supera el umbral definido, se marca como host hostil.
+*   **💡 Valor Diferencial:** No solo te dice "hay un problema", te dice **quién** es el problema (MAC Address), permitiendo una acción de bloqueo precisa.
+*   **🎯 Qué detecta:**
+    *   ✅ **Tarjetas de Red Averiada (Jabbering NICs):** Hardware dañado enviando basura a la red.
+    *   ✅ **Ataques DoS Volumétricos:** Intentos de saturación de ancho de banda.
+    *   ✅ **Tráfico Anómalo:** Clientes P2P descontrolados o errores de software.
 
 ### 4. FlapGuard (Consistencia de Topología L2) 🦇
 *Detección de fugas de VLAN e inestabilidad de puertos.*
 
 *   **🔬 Mecánica:** Crea un mapa dinámico de la relación `MAC Address <-> VLAN ID`.
 *   **🛡️ Lógica de Detección:** Monitoriza si una misma dirección MAC aparece en distintas VLANs en intervalos de tiempo muy cortos (Flapping).
-*   **💡 Valor Diferencial:** Un síntoma clásico de configuraciones erróneas que STP no siempre bloquea. Indica que hay un "puente" no autorizado entre dominios de difusión distintos.
-*   **Caso de Uso:**
-    *   **Cableado Cruzado:** Un técnico conecta por error un cable entre un puerto de acceso de la VLAN 10 y otro de la VLAN 20.
-    *   **VLAN Leaking:** Un switch mal configurado que está dejando escapar tráfico etiquetado hacia puertos nativos.
+*   **💡 Valor Diferencial:** Un síntoma clásico de configuraciones erróneas que STP no siempre bloquea.
+*   **🎯 Qué detecta:**
+    *   ✅ **VLAN Leaking:** Switches mal configurados dejando escapar tráfico etiquetado.
+    *   ✅ **Cableado Cruzado:** Puentes físicos accidentales entre dos VLANs distintas.
+    *   ✅ **Bucles Lógicos:** Rutas de red circular entre dominios de broadcast.
 
 ### 5. ArpWatchdog (Protección del Plano de Control) 🐶
-*El sistema de alerta temprana.*
+*Sistema de alerta temprana y análisis de patrones.*
 
-*   **🔬 Mecánica:** Realiza una inspección profunda de paquetes (DPI ligera) buscando cabeceras ARP y contando específicamente las operaciones `WHO-HAS` (Request).
-*   **🛡️ Lógica de Detección:** Los bucles de capa 2 amplifican el tráfico Broadcast. Como ARP es el protocolo de broadcast más común y vital, es el primero en saturarse. ArpWatchdog alerta cuando la tasa global de peticiones ARP se vuelve anormal.
-*   **💡 Valor Diferencial:** Protege la CPU de los switches y routers. Una tormenta ARP es lo que suele "matar" la conectividad incluso antes de que el enlace se sature por ancho de banda, ya que la CPU del router no puede procesar tantas peticiones.
-*   **Caso de Uso:** Detectar el inicio de una tormenta (Broadcast Radiation) segundos antes de que la red se vuelva inutilizable, dando tiempo a reaccionar.
+*   **🔬 Mecánica:** Realiza una inspección profunda (DPI) de paquetes ARP, analizando volumen, MAC origen e IPs destino (Rango Min/Max).
+*   **🛡️ Lógica de Detección:** Analiza si el tráfico ARP corresponde a un comportamiento normal, un ataque o un fallo físico.
+*   **💡 Valor Diferencial:** Distingue inteligentemente entre un bucle y un hacker basándose en la dispersión de IPs destino.
+*   **🎯 Qué detecta:**
+    *   ✅ **Escaneos de Red (Discovery):** Barridos secuenciales de IPs (`nmap`, `arp-scan`). El log mostrará `SUBNET SCANNING`.
+    *   ✅ **Bucles de Red:** El mismo paquete ARP repitiéndose infinitamente hacia una sola IP. El log mostrará `SINGLE TARGET ATTACK`.
+    *   ✅ **Virus/Malware:** Propagación lateral de gusanos intentando descubrir víctimas en la subred.
 
 ### 6. DhcpHunter (Cazador de Rogue DHCP) 🦈
 *Seguridad contra Man-in-the-Middle.*
 
-*   **🔬 Mecánica:** Analiza paquetes UDP (Puerto 67/68) en busca de ofertas DHCP (`DHCPOFFER`, `DHCPACK`). Verifica la MAC de origen y la IP (CIDR) contra una lista blanca.
+*   **🔬 Mecánica:** Analiza paquetes UDP (Puerto 67/68) verificando la MAC de origen y la IP contra una lista blanca (`trusted_macs`).
 *   **🛡️ Lógica de Detección:** Si un servidor desconocido ofrece una IP a un cliente, es inmediatamente marcado como Rogue.
-*   **Caso de Uso:** Un usuario conecta un router doméstico (TP-Link/D-Link) a la red corporativa, empezando a asignar IPs falsas a los empleados y cortando su acceso a internet.
+*   **🎯 Qué detecta:**
+    *   ✅ **Routers Domésticos:** Usuarios conectando TP-Link/D-Link por el puerto LAN.
+    *   ✅ **Ataques MITM:** Suplantación de Gateway mediante DHCP Spoofing.
+    *   ✅ **Errores de Configuración:** Servidores con roles DHCP activados accidentalmente.
 
 ### 7. FlowPanic (Detección de Pausas 802.3x) ⏸️
 *Monitorización de salud física y DoS.*
 
-*   **🔬 Mecánica:** Rastrea tramas de control Ethernet (`0x8808`) específicamente con OpCode `PAUSE` (`0x0001`).
-*   **🛡️ Lógica de Detección:** Las tramas PAUSE detienen la transmisión del switch. Una inundación de estas tramas es un síntoma de fallo hardware grave en una NIC o un ataque de denegación de servicio.
-*   **Caso de Uso:** Una tarjeta de red antigua falla y empieza a gritar "PAUSE" a la red, congelando el tráfico de todo un segmento sin saturar el ancho de banda.
+*   **🔬 Mecánica:** Rastrea tramas de control Ethernet (`0x8808`) con OpCode `PAUSE`.
+*   **🛡️ Lógica de Detección:** Una inundación de estas tramas indica que un dispositivo está colapsando o intentando detener la red.
+*   **🎯 Qué detecta:**
+    *   ✅ **Fallo de Hardware Crítico:** NICs o Switches a punto de morir por buffer lleno.
+    *   ✅ **Ataques L2 DoS:** Inundación de tramas de pausa para congelar el tráfico sin saturar el ancho de banda.
 
 ### 8. RaGuard (IPv6 Router Advertisement Guard) 📡
 *Protección de infraestructura IPv6.*
 
-*   **🔬 Mecánica:** Inspecciona paquetes ICMPv6 (`NextHeader 58`) buscando mensajes "Router Advertisement" (Type 134).
+*   **🔬 Mecánica:** Inspecciona paquetes ICMPv6 buscando mensajes "Router Advertisement".
 *   **🛡️ Lógica de Detección:** Solo permite RAs provenientes de las MACs de los routers Core autorizados.
-*   **Caso de Uso:** Windows y dispositivos móviles se autoconfiguran con cualquier RA que escuchen. Un atacante (o un PC mal configurado) puede anunciarse como router IPv6 y capturar todo el tráfico.
+*   **🎯 Qué detecta:**
+    *   ✅ **Rogue IPv6 Gateways:** Dispositivos (móviles/Windows) anunciándose como routers y secuestrando tráfico.
+    *   ✅ **Shadow IT:** Redes IPv6 paralelas no autorizadas creadas por dispositivos IoT.
 
 ### 9. McastPolicer (Control de Tormentas Multicast) 👻
 *Gestión de clonación y streaming.*
 
-*   **🔬 Mecánica:** Diferencia tráfico Multicast (IPv4 `01:00:5E...` / IPv6 `33:33...`) del Broadcast general.
-*   **🛡️ Lógica de Detección:** Aplica límites de velocidad específicos para tráfico Multicast.
-*   **Caso de Uso:** Software de clonación de aulas (FOG Project, Clonezilla) mal configurado que inunda la red, o cámaras de videovigilancia generando tormentas.
-
+*   **🔬 Mecánica:** Diferencia y mide tráfico Multicast (IPv4 `01:00:5E...` / IPv6 `33:33...`) separándolo del Broadcast.
+*   **🛡️ Lógica de Detección:** Aplica límites de velocidad específicos, permitiendo distinguir una clase con vídeo de un bucle catastrófico.
+*   **🎯 Qué detecta:**
+    *   ✅ **Tormentas de Clonación:** Software como FOG/Clonezilla mal configurado.
+    *   ✅ **Fugas de Vídeo:** Cámaras IP o IPTV inundando puertos de acceso.
 ---
 
 ### 📊 Telemetría y Observabilidad (Prometheus)
