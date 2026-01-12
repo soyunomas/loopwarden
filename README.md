@@ -159,6 +159,13 @@ A continuación se detallan todos los parámetros disponibles en el archivo de c
 | **[algorithms.mcast_policer]**| `enabled` | `true` | Control de tráfico Multicast. |
 | | `max_pps` | `8000` | Límite global de paquetes multicast por segundo (Video/Clonación). |
 
+### 📊 Telemetría
+
+| Sección | Parámetro | Default | Descripción |
+| :--- | :--- | :--- | :--- |
+| **[telemetry]** | `enabled` | `true` | Activa el servidor HTTP de métricas Prometheus. |
+| | `listen_address` | `":9090"` | Interfaz y puerto de escucha (ej: `127.0.0.1:9090` para local, `:9090` para todo). |
+
 ## 🚨 Playbook de Respuesta a Incidentes
 
 Guía de actuación rápida para operadores de red (NOC) ante alertas críticas de LoopWarden:
