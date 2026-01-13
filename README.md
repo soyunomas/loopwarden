@@ -208,8 +208,8 @@ LoopWarden está diseñado para ser compilado y ejecutado directamente desde su 
 ```bash
 # Paso 1: Clonar el repositorio de LoopWarden
 # Obtiene la última versión del código fuente.
-git clone https://github.com/soyunomas/LoopWarden.git
-cd LoopWarden
+git clone https://github.com/soyunomas/loopWarden.git
+cd loopWarden
 
 # Paso 2: Descargar dependencias y compilar el binario optimizado
 # 'make deps' sincroniza los módulos de Go.
