@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context" 
 	"flag"
 	"fmt"
 	"io"
@@ -45,17 +46,20 @@ func main() {
 		}
 	}
 
-	// 2. Notifier (SINGLETON - Compartido entre todos los motores)
+	// 2. Notifier
 	sensorName := cfg.System.SensorName
 	if sensorName == "" { sensorName = "LoopWarden" }
 	notify := notifier.NewNotifier(&cfg.Alerts, sensorName)
 
-	// Validar interfaces
 	if len(cfg.Network.Interfaces) == 0 {
 		log.Fatal("❌ No interfaces defined in config (network.interfaces = [])")
 	}
 
-	// Canal de señales global
+	// --- CAMBIO CRÍTICO: GESTIÓN DE SEÑALES CON CONTEXTO ---
+	// Creamos un contexto cancelable para coordinar el apagado
+	ctx, cancel := context.WithCancel(context.Background())
+	
+	// Canal de señales solo para el main
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 
@@ -65,25 +69,20 @@ func main() {
 	fmt.Printf("🛡️  LoopWarden starting on %d interfaces...\n", len(cfg.Network.Interfaces))
 	notify.Alert(fmt.Sprintf("🟢 LoopWarden Started (Monitors: %v)", cfg.Network.Interfaces))
 
-	// Lanzamos un stack completo por cada interfaz
 	for _, ifaceName := range cfg.Network.Interfaces {
 		wg.Add(1)
-		
-		// Capture loop variable (aunque en Go 1.22 ya no es necesario, buena práctica legacy)
 		currentIface := ifaceName 
 
 		go func(iface string) {
 			defer wg.Done()
 			
-			// 3.1 Motor Independiente (Memoria aislada)
-			// Pasamos el nombre de la interfaz para que ActiveProbe sepa quién es.
 			engine := detector.NewEngine(&cfg.Algorithms, notify, iface)
 
-			// 3.2 Sniffer Dedicado
 			log.Printf("🚀 Launching stack for %s", iface)
-			if err := sniffer.Run(iface, cfg, engine, sigChan); err != nil {
+			
+			// AHORA PASAMOS 'ctx' EN LUGAR DE 'sigChan'
+			if err := sniffer.Run(ctx, iface, cfg, engine); err != nil {
 				log.Printf("❌ Critical error on interface %s: %v", iface, err)
-				// No matamos todo el proceso, quizás otras interfaces siguen vivas.
 				notify.Alert(fmt.Sprintf("❌ Stack failure on %s: %v", iface, err))
 			} else {
 				log.Printf("⏹️ Stack stopped for %s", iface)
@@ -97,6 +96,8 @@ func main() {
 			addr := cfg.Telemetry.ListenAddress
 			if addr == "" { addr = ":9090" }
 			http.Handle("/metrics", promhttp.Handler())
+			// Servidor HTTP también debería cerrarse, pero en toolings simples se suele dejar morir con el proceso.
+			// Para perfección, se podría usar server.Shutdown(ctx), pero no es crítico aquí.
 			log.Printf("📊 Metrics server listening on %s", addr)
 			if err := http.ListenAndServe(addr, nil); err != nil {
 				log.Printf("⚠️ Failed to start metrics: %v", err)
@@ -104,13 +105,15 @@ func main() {
 		}()
 	}
 
-	// Esperar señal de terminación (que cerrará los sniffers vía sigChan)
-	// Como sniffer.Run recibe sigChan, saldrá cuando el canal reciba algo.
-	// Esperamos a que todas las goroutines terminen.
-	<-sigChan // Bloquea hasta CTRL+C
-	fmt.Println("\nSignal received, shutting down stacks...")
+	// BLOQUEO PRINCIPAL
+	// Esperamos aquí hasta recibir la señal
+	receivedSig := <-sigChan 
+	fmt.Printf("\nSignal received (%v), shutting down stacks...\n", receivedSig)
 	
-	// Esperamos a que los sniffers limpien (Wait)
+	// 1. Ordenamos a todos los sniffers que paren
+	cancel() 
+	
+	// 2. Esperamos a que terminen limpiamente
 	wg.Wait()
 	
 	notify.Alert("🔴 LoopWarden stopped gracefully")

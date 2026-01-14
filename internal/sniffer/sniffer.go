@@ -1,11 +1,11 @@
 package sniffer
 
 import (
+	"context"
 	"encoding/binary"
 	"fmt"
 	"log"
 	"net"
-	"os"
 	"strings"
 	"time"
 
@@ -17,34 +17,26 @@ import (
 	"github.com/soyunomas/loopwarden/internal/telemetry"
 )
 
-// Run inicia la captura en UNA interfaz específica
-// Ahora recibe 'ifaceName' como argumento principal
-func Run(ifaceName string, cfg *config.Config, engine *detector.Engine, stopChan chan os.Signal) error {
+// Run ahora recibe 'ctx context.Context' en lugar de channel
+func Run(ctx context.Context, ifaceName string, cfg *config.Config, engine *detector.Engine) error {
 	
-	// 1. Obtener interfaz física por nombre pasado
 	ifi, err := net.InterfaceByName(ifaceName)
 	if err != nil {
 		return fmt.Errorf("interface %s not found: %w", ifaceName, err)
 	}
 
-	// 2. Abrir Socket Raw (AF_PACKET)
 	conn, err := packet.Listen(ifi, packet.Raw, 3, nil)
 	if err != nil {
 		return fmt.Errorf("[%s] failed to open raw socket: %w", ifaceName, err)
 	}
-	// No cerramos con defer aquí porque Run es bloqueante y manejado por goroutine superior,
-	// pero para limpieza correcta al salir el main:
 	defer conn.Close()
 
-	// 3. Iniciar Algoritmos
 	engine.StartAll(conn, ifi)
 
-	// 4. Promiscuous Mode
 	if err := conn.SetPromiscuous(true); err != nil {
 		log.Printf("[%s] Warning: Failed to set promiscuous mode: %v", ifaceName, err)
 	}
 
-	// 5. BPF Filter
 	filter, err := bpf.Assemble([]bpf.Instruction{
 		bpf.LoadAbsolute{Off: 0, Size: 1},
 		bpf.ALUOpConstant{Op: bpf.ALUOpAnd, Val: 1},
@@ -62,7 +54,7 @@ func Run(ifaceName string, cfg *config.Config, engine *detector.Engine, stopChan
 
 	log.Printf("🛡️  Sniffer active on %s [BPF Active]", ifaceName)
 
-	// --- Monitor de Drops (Por interfaz) ---
+	// --- Monitor de Drops ---
 	go func() {
 		ticker := time.NewTicker(5 * time.Second)
 		defer ticker.Stop()
@@ -70,7 +62,7 @@ func Run(ifaceName string, cfg *config.Config, engine *detector.Engine, stopChan
 
 		for {
 			select {
-			case <-stopChan:
+			case <-ctx.Done(): // <--- CAMBIO: Escuchamos contexto
 				return
 			case <-ticker.C:
 				stats, err := conn.Stats()
@@ -88,30 +80,27 @@ func Run(ifaceName string, cfg *config.Config, engine *detector.Engine, stopChan
 		}
 	}()
 
-	// 6. Loop de Lectura (Hot Path)
-	// Zero-Alloc buffer per goroutine
+	// 6. Loop de Lectura
 	buf := make([]byte, cfg.Network.SnapLen)
 
 	for {
-		// Leemos del canal de cierre para salir limpiamente
+		// Verificamos si nos mandaron parar ANTES de leer
 		select {
-		case <-stopChan:
+		case <-ctx.Done(): // <--- CAMBIO: Escuchamos contexto
 			return nil
 		default:
-			// Non-blocking select allow us to proceed to read
 		}
 		
-		// Set deadline para permitir chequear stopChan periódicamente si no hay tráfico
 		conn.SetReadDeadline(time.Now().Add(1 * time.Second))
 		
 		n, _, err := conn.ReadFrom(buf)
 		if err != nil {
-			if strings.Contains(err.Error(), "closed") {
-				return nil
-			}
-			// Timeout es normal
+			// Si es timeout, volvemos al inicio del loop (donde se chequea ctx.Done)
 			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
 				continue
+			}
+			if strings.Contains(err.Error(), "closed") {
+				return nil
 			}
 			log.Printf("⚠️ [%s] Read error: %v", ifaceName, err)
 			continue
