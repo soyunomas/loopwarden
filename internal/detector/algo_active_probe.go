@@ -12,7 +12,7 @@ import (
 	"github.com/mdlayher/packet"
 	"github.com/soyunomas/loopwarden/internal/config"
 	"github.com/soyunomas/loopwarden/internal/notifier"
-	"github.com/soyunomas/loopwarden/internal/telemetry" // IMPORTAR
+	"github.com/soyunomas/loopwarden/internal/telemetry"
 	"github.com/soyunomas/loopwarden/internal/utils"
 )
 
@@ -22,6 +22,7 @@ type ActiveProbe struct {
 	cfg        *config.ActiveProbeConfig
 	notify     *notifier.Notifier
 	myMAC      net.HardwareAddr
+	ifaceName  string // <--- CONCIENCIA DE IDENTIDAD
 	probeFrame []byte
 	destAddr   *packet.Addr
 
@@ -29,10 +30,12 @@ type ActiveProbe struct {
 	lastAlert time.Time
 }
 
-func NewActiveProbe(cfg *config.ActiveProbeConfig, n *notifier.Notifier) *ActiveProbe {
+// NewActiveProbe ahora recibe el nombre de la interfaz
+func NewActiveProbe(cfg *config.ActiveProbeConfig, n *notifier.Notifier, ifaceName string) *ActiveProbe {
 	return &ActiveProbe{
-		cfg:    cfg,
-		notify: n,
+		cfg:       cfg,
+		notify:    n,
+		ifaceName: ifaceName,
 	}
 }
 
@@ -50,17 +53,21 @@ func (ap *ActiveProbe) Start(conn *packet.Conn, iface *net.Interface) error {
 
 	typeBytes := make([]byte, 2)
 	binary.BigEndian.PutUint16(typeBytes, ap.cfg.Ethertype)
-	payload := []byte(ap.cfg.MagicPayload)
 
-	frame := make([]byte, 0, 14+len(payload))
+	// --- GENERACIÓN DE PAYLOAD CON IDENTIDAD ---
+	// Formato: "MAGIC_PAYLOAD|INTERFACE_NAME"
+	fullPayload := fmt.Sprintf("%s|%s", ap.cfg.MagicPayload, ap.ifaceName)
+	payloadBytes := []byte(fullPayload)
+
+	frame := make([]byte, 0, 14+len(payloadBytes))
 	frame = append(frame, broadcastHW...)
 	frame = append(frame, ap.myMAC...)
 	frame = append(frame, typeBytes...)
-	frame = append(frame, payload...)
+	frame = append(frame, payloadBytes...)
 
 	ap.probeFrame = frame
 
-	log.Printf("[ActiveProbe] Initialized. Sending probes every %dms (Type: 0x%X)", ap.cfg.IntervalMs, ap.cfg.Ethertype)
+	log.Printf("[%s] ActiveProbe Initialized. Sending identity probes '%s'", ap.ifaceName, fullPayload)
 
 	go func() {
 		ticker := time.NewTicker(time.Duration(ap.cfg.IntervalMs) * time.Millisecond)
@@ -87,49 +94,73 @@ func (ap *ActiveProbe) OnPacket(data []byte, length int, vlanID uint16) {
 	}
 
 	srcMac := data[6:12]
+
+	// Solo analizamos si viene de NOSOTROS (es decir, el paquete dio la vuelta)
 	if bytes.Equal(srcMac, ap.myMAC) {
 		etherType := binary.BigEndian.Uint16(data[etherTypeOffset : etherTypeOffset+2])
 
 		if etherType == ap.cfg.Ethertype {
 			payload := data[headerSize:length]
-			if bytes.Contains(payload, []byte(ap.cfg.MagicPayload)) {
-				
+			
+			// Buscamos el separador mágico para extraer la identidad
+			// Usamos el prefijo mágico configurado
+			magic := []byte(ap.cfg.MagicPayload + "|")
+			
+			if bytes.Contains(payload, magic) {
 				ap.mu.Lock()
+				defer ap.mu.Unlock() // Defer es aceptable aquí (Cold path relative)
+				
 				now := time.Now()
 				if now.Sub(ap.lastAlert) > ProbeAlertCooldown {
 					
-					// TELEMETRY: HARD LOOP DETECTED
-					telemetry.EngineHits.WithLabelValues("ActiveProbe", "HardLoop").Inc()
+					// Extracción de origen (Parsing zero-alloc style si fuera crítico, aquí string es OK)
+					// Buscamos dónde empieza el magic
+					idx := bytes.Index(payload, magic)
+					if idx == -1 { return } // Should not happen due to Contains check
 
-					// Capturamos DST MAC para ver si regresó como broadcast o unicast
-					dstMac := data[0:6]
+					// El sufijo comienza después del magic
+					startSuffix := idx + len(magic)
+					// Limpiamos padding (0x00) si existe
+					suffixBytes := payload[startSuffix:]
+					nullIdx := bytes.IndexByte(suffixBytes, 0)
+					if nullIdx != -1 {
+						suffixBytes = suffixBytes[:nullIdx]
+					}
+					remoteIface := string(suffixBytes)
+
+					// --- LÓGICA DE DETECCIÓN CRUZADA ---
+					var alertMsg string
+					var alertType string
+
+					if remoteIface == ap.ifaceName {
+						// CASO A: SELF LOOP
+						alertType = "HardLoop"
+						alertMsg = fmt.Sprintf("[%s] 🚨 LOOP CONFIRMED! (Self-Loop)\n"+
+							"    STATUS: Cable connects interface %s back to itself via switch.\n"+
+							"    ACTION: IMMEDIATE DISCONNECT.", ap.ifaceName, ap.ifaceName)
+					} else {
+						// CASO B: CROSS LOOP
+						alertType = "CrossDomainLoop"
+						alertMsg = fmt.Sprintf("[%s] ☣️ CRITICAL TOPOLOGY ERROR (Cross-Domain)!\n"+
+							"    DETECTED: Physical bridge between two different networks.\n"+
+							"    PATH:     [Remote: %s]  ===>  [Local: %s]\n"+
+							"    ACTION:   Check cabling between these two segments immediately.", 
+							ap.ifaceName, remoteIface, ap.ifaceName)
+					}
+
+					// TELEMETRY
+					telemetry.EngineHits.WithLabelValues("ActiveProbe", alertType).Inc()
 					
-					go func(vlan uint16, dMac []byte) {
-						vlanMsg := "Native VLAN"
-						if vlan != 0 {
-							vlanMsg = fmt.Sprintf("VLAN %d", vlan)
-						}
-
-						// Chequeo de integridad: ¿Volvió como Broadcast o alguien lo reescribió?
-						retInfo := utils.ClassifyMAC(dMac)
-						pathMsg := "Broadcast Path"
-						if retInfo.Name != "Broadcast" {
-							pathMsg = fmt.Sprintf("Altered Path via %s (%s)", retInfo.Name, retInfo.Description)
-						}
-
-						msg := fmt.Sprintf("[ActiveProbe] 🚨 LOOP CONFIRMED!\n"+
-							"    VLAN:   %s\n"+
-							"    STATUS: HARD LOOP (Probe returned)\n"+
-							"    PATH:   %s\n"+
-							"    ACTION: IMMEDIATE DISCONNECT REQUIRED.", 
-							vlanMsg, pathMsg)
-						
-						ap.notify.Alert(msg)
-					}(vlanID, dstMac)
+					// Capturamos MAC destino para info extra
+					dstMac := data[0:6]
+					retInfo := utils.ClassifyMAC(dstMac)
+					
+					fullMsg := fmt.Sprintf("%s\n    RETURN PATH: %s", alertMsg, retInfo.Description)
+					
+					go ap.notify.Alert(fullMsg)
 
 					ap.lastAlert = now
 				}
-				ap.mu.Unlock()
 			}
 		}
 	}
