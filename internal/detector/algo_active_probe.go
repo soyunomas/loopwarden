@@ -12,7 +12,7 @@ import (
 	"github.com/mdlayher/packet"
 	"github.com/soyunomas/loopwarden/internal/config"
 	"github.com/soyunomas/loopwarden/internal/notifier"
-	"github.com/soyunomas/loopwarden/internal/telemetry" // IMPORTAR
+	"github.com/soyunomas/loopwarden/internal/telemetry"
 	"github.com/soyunomas/loopwarden/internal/utils"
 )
 
@@ -22,6 +22,12 @@ type ActiveProbe struct {
 	cfg        *config.ActiveProbeConfig
 	notify     *notifier.Notifier
 	myMAC      net.HardwareAddr
+	ifaceName  string
+	
+	// Configuración Efectiva
+	intervalMs int
+	ethertype  uint16
+	
 	probeFrame []byte
 	destAddr   *packet.Addr
 
@@ -29,10 +35,11 @@ type ActiveProbe struct {
 	lastAlert time.Time
 }
 
-func NewActiveProbe(cfg *config.ActiveProbeConfig, n *notifier.Notifier) *ActiveProbe {
+func NewActiveProbe(cfg *config.ActiveProbeConfig, n *notifier.Notifier, ifaceName string) *ActiveProbe {
 	return &ActiveProbe{
-		cfg:    cfg,
-		notify: n,
+		cfg:       cfg,
+		notify:    n,
+		ifaceName: ifaceName,
 	}
 }
 
@@ -42,28 +49,43 @@ func (ap *ActiveProbe) Name() string {
 
 func (ap *ActiveProbe) Start(conn *packet.Conn, iface *net.Interface) error {
 	ap.myMAC = iface.HardwareAddr
-	broadcastHW := net.HardwareAddr{0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF}
+	
+	// 1. Calcular Configuración Efectiva
+	ap.intervalMs = ap.cfg.IntervalMs
+	ap.ethertype = ap.cfg.Ethertype
 
+	if override, ok := ap.cfg.Overrides[iface.Name]; ok {
+		if override.IntervalMs > 0 {
+			ap.intervalMs = override.IntervalMs
+			log.Printf("🔧 [ActiveProbe] Override applied for %s: Interval = %dms", iface.Name, ap.intervalMs)
+		}
+	}
+
+	broadcastHW := net.HardwareAddr{0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF}
 	ap.destAddr = &packet.Addr{
 		HardwareAddr: broadcastHW,
 	}
 
 	typeBytes := make([]byte, 2)
-	binary.BigEndian.PutUint16(typeBytes, ap.cfg.Ethertype)
-	payload := []byte(ap.cfg.MagicPayload)
+	binary.BigEndian.PutUint16(typeBytes, ap.ethertype)
 
-	frame := make([]byte, 0, 14+len(payload))
+	// --- GENERACIÓN DE PAYLOAD CON IDENTIDAD ---
+	fullPayload := fmt.Sprintf("%s|%s", ap.cfg.MagicPayload, ap.ifaceName)
+	payloadBytes := []byte(fullPayload)
+
+	frame := make([]byte, 0, 14+len(payloadBytes))
 	frame = append(frame, broadcastHW...)
 	frame = append(frame, ap.myMAC...)
 	frame = append(frame, typeBytes...)
-	frame = append(frame, payload...)
+	frame = append(frame, payloadBytes...)
 
 	ap.probeFrame = frame
 
-	log.Printf("[ActiveProbe] Initialized. Sending probes every %dms (Type: 0x%X)", ap.cfg.IntervalMs, ap.cfg.Ethertype)
+	log.Printf("[%s] ActiveProbe Initialized. Frequency: %dms", ap.ifaceName, ap.intervalMs)
 
+	// 2. Usar Intervalo Efectivo en el Ticker
 	go func() {
-		ticker := time.NewTicker(time.Duration(ap.cfg.IntervalMs) * time.Millisecond)
+		ticker := time.NewTicker(time.Duration(ap.intervalMs) * time.Millisecond)
 		defer ticker.Stop()
 
 		for range ticker.C {
@@ -87,49 +109,66 @@ func (ap *ActiveProbe) OnPacket(data []byte, length int, vlanID uint16) {
 	}
 
 	srcMac := data[6:12]
+
 	if bytes.Equal(srcMac, ap.myMAC) {
 		etherType := binary.BigEndian.Uint16(data[etherTypeOffset : etherTypeOffset+2])
 
-		if etherType == ap.cfg.Ethertype {
+		// Usamos variable local ap.ethertype
+		if etherType == ap.ethertype {
 			payload := data[headerSize:length]
-			if bytes.Contains(payload, []byte(ap.cfg.MagicPayload)) {
-				
+			
+			magic := []byte(ap.cfg.MagicPayload + "|")
+			
+			if bytes.Contains(payload, magic) {
 				ap.mu.Lock()
+				defer ap.mu.Unlock()
+				
 				now := time.Now()
 				if now.Sub(ap.lastAlert) > ProbeAlertCooldown {
 					
-					// TELEMETRY: HARD LOOP DETECTED
-					telemetry.EngineHits.WithLabelValues("ActiveProbe", "HardLoop").Inc()
+					idx := bytes.Index(payload, magic)
+					if idx == -1 { return }
 
-					// Capturamos DST MAC para ver si regresó como broadcast o unicast
-					dstMac := data[0:6]
+					startSuffix := idx + len(magic)
+					suffixBytes := payload[startSuffix:]
+					nullIdx := bytes.IndexByte(suffixBytes, 0)
+					if nullIdx != -1 {
+						suffixBytes = suffixBytes[:nullIdx]
+					}
+					remoteIface := string(suffixBytes)
+
+					var alertMsg string
+					var alertType string
+
+					if remoteIface == ap.ifaceName {
+						alertType = "HardLoop"
+						alertMsg = fmt.Sprintf("[%s] 🚨 LOOP CONFIRMED! (Self-Loop)\n"+
+							"    INTERFACE: %s\n"+
+							"    STATUS:    Cable connects interface back to itself.\n"+
+							"    ACTION:    IMMEDIATE DISCONNECT.", ap.ifaceName, ap.ifaceName)
+					} else {
+						alertType = "CrossDomainLoop"
+						alertMsg = fmt.Sprintf("[%s] ☣️ CRITICAL TOPOLOGY ERROR (Cross-Domain)!\n"+
+							"    INTERFACE: %s\n"+
+							"    DETECTED:  Physical bridge between two different networks.\n"+
+							"    PATH:      [Remote: %s]  ===>  [Local: %s]\n"+
+							"    ACTION:    Check cabling between these two segments immediately.", 
+							ap.ifaceName, ap.ifaceName, remoteIface, ap.ifaceName)
+					}
+
+					telemetry.EngineHits.WithLabelValues(ap.ifaceName, "ActiveProbe", alertType).Inc()
 					
-					go func(vlan uint16, dMac []byte) {
-						vlanMsg := "Native VLAN"
-						if vlan != 0 {
-							vlanMsg = fmt.Sprintf("VLAN %d", vlan)
-						}
-
-						// Chequeo de integridad: ¿Volvió como Broadcast o alguien lo reescribió?
-						retInfo := utils.ClassifyMAC(dMac)
-						pathMsg := "Broadcast Path"
-						if retInfo.Name != "Broadcast" {
-							pathMsg = fmt.Sprintf("Altered Path via %s (%s)", retInfo.Name, retInfo.Description)
-						}
-
-						msg := fmt.Sprintf("[ActiveProbe] 🚨 LOOP CONFIRMED!\n"+
-							"    VLAN:   %s\n"+
-							"    STATUS: HARD LOOP (Probe returned)\n"+
-							"    PATH:   %s\n"+
-							"    ACTION: IMMEDIATE DISCONNECT REQUIRED.", 
-							vlanMsg, pathMsg)
-						
-						ap.notify.Alert(msg)
-					}(vlanID, dstMac)
+					dstMac := data[0:6]
+					retInfo := utils.ClassifyMAC(dstMac)
+					
+					fullMsg := fmt.Sprintf("%s\n    RETURN PATH: %s", alertMsg, retInfo.Description)
+					
+					// ActiveProbe constructs message in sync path (under lock) for safety, 
+					// but dispatch is async in notifier.
+					go ap.notify.Alert(fullMsg)
 
 					ap.lastAlert = now
 				}
-				ap.mu.Unlock()
 			}
 		}
 	}

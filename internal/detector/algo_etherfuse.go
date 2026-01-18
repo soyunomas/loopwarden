@@ -2,6 +2,7 @@ package detector
 
 import (
 	"fmt"
+	"log"
 	"net"
 	"sync"
 	"time"
@@ -9,7 +10,7 @@ import (
 	"github.com/mdlayher/packet"
 	"github.com/soyunomas/loopwarden/internal/config"
 	"github.com/soyunomas/loopwarden/internal/notifier"
-	"github.com/soyunomas/loopwarden/internal/telemetry" // IMPORTAR
+	"github.com/soyunomas/loopwarden/internal/telemetry"
 	"github.com/soyunomas/loopwarden/internal/utils"
 )
 
@@ -19,23 +20,30 @@ const (
 )
 
 type EtherFuse struct {
-	cfg            *config.EtherFuseConfig
-	notify         *notifier.Notifier
-	mu             sync.Mutex 
+	cfg       *config.EtherFuseConfig
+	notify    *notifier.Notifier
+	ifaceName string // Identidad de la interfaz
+	mu        sync.Mutex
+
+	// Configuración Efectiva
+	alertThreshold int
+	stormPPSLimit  uint64
 
 	ringBuffer  []uint64
-	lookupTable map[uint64]uint8 
-	writeCursor int              
+	lookupTable map[uint64]uint8
+	writeCursor int
 
 	packetsSec    uint64
 	lastReset     time.Time
 	lastAlertTime time.Time
 }
 
-func NewEtherFuse(cfg *config.EtherFuseConfig, n *notifier.Notifier) *EtherFuse {
+func NewEtherFuse(cfg *config.EtherFuseConfig, n *notifier.Notifier, ifaceName string) *EtherFuse {
 	return &EtherFuse{
 		cfg:         cfg,
 		notify:      n,
+		ifaceName:   ifaceName,
+		// HistorySize es estático
 		ringBuffer:  make([]uint64, cfg.HistorySize),
 		lookupTable: make(map[uint64]uint8, cfg.HistorySize),
 		writeCursor: 0,
@@ -45,7 +53,24 @@ func NewEtherFuse(cfg *config.EtherFuseConfig, n *notifier.Notifier) *EtherFuse 
 
 func (ef *EtherFuse) Name() string { return "EtherFuse" }
 
-func (ef *EtherFuse) Start(conn *packet.Conn, iface *net.Interface) error { return nil }
+func (ef *EtherFuse) Start(conn *packet.Conn, iface *net.Interface) error {
+	// 1. Base
+	ef.alertThreshold = ef.cfg.AlertThreshold
+	ef.stormPPSLimit = ef.cfg.StormPPSLimit
+
+	// 2. Override
+	if override, ok := ef.cfg.Overrides[iface.Name]; ok {
+		if override.AlertThreshold > 0 {
+			ef.alertThreshold = override.AlertThreshold
+		}
+		if override.StormPPSLimit > 0 {
+			ef.stormPPSLimit = override.StormPPSLimit
+		}
+		log.Printf("🔧 [EtherFuse] Override applied for %s: Threshold=%d, StormLimit=%d",
+			iface.Name, ef.alertThreshold, ef.stormPPSLimit)
+	}
+	return nil
+}
 
 func hashBody(data []byte) uint64 {
 	var hash uint64 = offset64
@@ -57,27 +82,37 @@ func hashBody(data []byte) uint64 {
 }
 
 func (ef *EtherFuse) OnPacket(data []byte, length int, vlanID uint16) {
-	// 1. Calcular Hash del contenido
+	// 1. Calcular Hash
 	sum := hashBody(data[:length])
 
 	ef.mu.Lock()
 
 	// Check de tormenta global (PPS)
 	ef.packetsSec++
-	if ef.packetsSec&0x3FF == 0 { 
+	if ef.packetsSec&0x3FF == 0 {
 		now := time.Now()
 		if now.Sub(ef.lastReset) >= time.Second {
-			if ef.packetsSec > ef.cfg.StormPPSLimit {
+			// USAR VARIABLE LOCAL stormPPSLimit
+			if ef.packetsSec > ef.stormPPSLimit {
 				if now.Sub(ef.lastAlertTime) > 5*time.Second {
-					// METRICA AÑADIDA: Tormenta detectada
-					telemetry.EngineHits.WithLabelValues("EtherFuse", "GlobalStorm").Inc()
-					
+					// UPDATED: Added ef.ifaceName label
+					telemetry.EngineHits.WithLabelValues(ef.ifaceName, "EtherFuse", "GlobalStorm").Inc()
+
 					loc := "Native"
-					if vlanID != 0 { loc = fmt.Sprintf("%d", vlanID) }
+					if vlanID != 0 {
+						loc = fmt.Sprintf("%d", vlanID)
+					}
 					pps := ef.packetsSec
-					go func(l string, p uint64) {
-						ef.notify.Alert(fmt.Sprintf("[EtherFuse] ⛈️ GLOBAL STORM DETECTED! VLAN: %s | Rate: %d pps", l, p))
-					}(loc, pps)
+					
+					// CAPTURE VARIABLE FOR SAFETY
+					currentIface := ef.ifaceName
+
+					go func(iface string, l string, p uint64) {
+						ef.notify.Alert(fmt.Sprintf("[EtherFuse] ⛈️ GLOBAL STORM DETECTED!\n"+
+							"    INTERFACE: %s\n"+
+							"    VLAN:      %s\n"+
+							"    RATE:      %d pps", iface, l, p))
+					}(currentIface, loc, pps)
 					ef.lastAlertTime = now
 				}
 			}
@@ -93,11 +128,11 @@ func (ef *EtherFuse) OnPacket(data []byte, length int, vlanID uint16) {
 		newCount := count + 1
 		ef.lookupTable[sum] = newCount
 
-		if int(newCount) > ef.cfg.AlertThreshold {
+		if int(newCount) > ef.alertThreshold {
 			if time.Since(ef.lastAlertTime) > 5*time.Second {
-				
-				// METRICA AÑADIDA: Bucle detectado
-				telemetry.EngineHits.WithLabelValues("EtherFuse", "LoopDetected").Inc()
+
+				// UPDATED: Added ef.ifaceName label
+				telemetry.EngineHits.WithLabelValues(ef.ifaceName, "EtherFuse", "LoopDetected").Inc()
 
 				var dstMacBytes, srcMacBytes []byte
 				if length >= 12 {
@@ -111,8 +146,11 @@ func (ef *EtherFuse) OnPacket(data []byte, length int, vlanID uint16) {
 				if vlanID != 0 {
 					vlanStr = fmt.Sprintf("%d", vlanID)
 				}
+				
+				// CAPTURE VARIABLE FOR SAFETY
+				currentIface := ef.ifaceName
 
-				go func(v string, sMac, dMac []byte, h uint64, reps uint8) {
+				go func(iface string, v string, sMac, dMac []byte, h uint64, reps uint8) {
 					targetInfo := utils.ClassifyMAC(dMac)
 					impact := "User Traffic"
 					if targetInfo.IsCritical {
@@ -123,16 +161,17 @@ func (ef *EtherFuse) OnPacket(data []byte, length int, vlanID uint16) {
 					dstStr := net.HardwareAddr(dMac).String()
 
 					msg := fmt.Sprintf("[EtherFuse] 🚨 LOOP DETECTED!\n"+
+						"    INTERFACE:   %s\n"+
 						"    VLAN:        %s\n"+
 						"    SOURCE MAC:  %s\n"+
 						"    TARGET MAC:  %s (%s)\n"+
 						"    PROTOCOL:    %s\n"+
 						"    IMPACT:      %s\n"+
-						"    REPETITIONS: %d (Hash: %x)", 
-						v, srcStr, dstStr, targetInfo.Name, targetInfo.Description, impact, reps, h)
+						"    REPETITIONS: %d (Hash: %x)",
+						iface, v, srcStr, dstStr, targetInfo.Name, targetInfo.Description, impact, reps, h)
 
 					ef.notify.Alert(msg)
-				}(vlanStr, srcMacBytes, dstMacBytes, sum, newCount)
+				}(currentIface, vlanStr, srcMacBytes, dstMacBytes, sum, newCount)
 
 				ef.lastAlertTime = time.Now()
 			}

@@ -1,11 +1,11 @@
 package sniffer
 
 import (
+	"context"
 	"encoding/binary"
 	"fmt"
 	"log"
 	"net"
-	"os"
 	"strings"
 	"time"
 
@@ -17,70 +17,65 @@ import (
 	"github.com/soyunomas/loopwarden/internal/telemetry"
 )
 
-// Run inicia la captura de paquetes a nivel de socket RAW.
-func Run(cfg *config.Config, engine *detector.Engine, stopChan chan os.Signal) error {
-	// 1. Obtener interfaz física
-	ifi, err := net.InterfaceByName(cfg.Network.Interface)
+// Run inicia la captura de paquetes.
+// OPTIMIZACIÓN: Implementa "Socket Breaker" para shutdown inmediato.
+func Run(ctx context.Context, ifaceName string, cfg *config.Config, engine *detector.Engine) error {
+	
+	ifi, err := net.InterfaceByName(ifaceName)
 	if err != nil {
-		return fmt.Errorf("interface %s not found: %w", cfg.Network.Interface, err)
+		return fmt.Errorf("interface %s not found: %w", ifaceName, err)
 	}
 
-	// 2. Abrir Socket Raw (AF_PACKET)
 	conn, err := packet.Listen(ifi, packet.Raw, 3, nil)
 	if err != nil {
-		return fmt.Errorf("failed to open raw socket: %w", err)
+		return fmt.Errorf("[%s] failed to open raw socket: %w", ifaceName, err)
 	}
+	// Nota: No usamos defer conn.Close() aquí de forma simple, 
+	// porque lo cerraremos explícitamente en el Breaker para desbloquear el Read.
+	// Sin embargo, Go permite Close() múltiples veces sin pánico, así que lo mantenemos por seguridad.
 	defer conn.Close()
 
-	// 3. Iniciar Algoritmos
 	engine.StartAll(conn, ifi)
 
-	// 4. Promiscuous Mode
 	if err := conn.SetPromiscuous(true); err != nil {
-		log.Printf("Warning: Failed to set promiscuous mode on %s: %v", cfg.Network.Interface, err)
+		log.Printf("[%s] Warning: Failed to set promiscuous mode: %v", ifaceName, err)
 	}
 
-	// 5. BPF Filter (Optimización Kernel Side)
-	// Solo deja pasar Broadcast y Multicast al user-space.
 	filter, err := bpf.Assemble([]bpf.Instruction{
 		bpf.LoadAbsolute{Off: 0, Size: 1},
 		bpf.ALUOpConstant{Op: bpf.ALUOpAnd, Val: 1},
 		bpf.JumpIf{Cond: bpf.JumpEqual, Val: 0, SkipTrue: 1},
-		bpf.RetConstant{Val: uint32(cfg.Network.SnapLen)}, // Keep
-		bpf.RetConstant{Val: 0},                           // Drop
+		bpf.RetConstant{Val: uint32(cfg.Network.SnapLen)}, 
+		bpf.RetConstant{Val: 0},                           
 	})
 	if err != nil {
-		return fmt.Errorf("BPF assembly failed: %w", err)
+		return fmt.Errorf("[%s] BPF assembly failed: %w", ifaceName, err)
 	}
 
 	if err := conn.SetBPF(filter); err != nil {
-		return fmt.Errorf("failed to apply BPF filter: %w", err)
+		return fmt.Errorf("[%s] failed to apply BPF filter: %w", ifaceName, err)
 	}
 
-	log.Printf("🛡️  Sniffer active on %s [BPF: Multicast/Broadcast Only]", cfg.Network.Interface)
+	log.Printf("🛡️  Sniffer active on %s [BPF Active]", ifaceName)
 
-	// --- 5.5 MONITOR DE SALUD DEL KERNEL (Background) ---
-	// Verifica si el buffer del kernel se desborda (Drops).
-	// Se hace en goroutine para no invocar Syscalls en el hot-loop.
+	// --- 1. MONITOR DE DROPS ---
 	go func() {
 		ticker := time.NewTicker(5 * time.Second)
 		defer ticker.Stop()
-		// CORRECCIÓN: Usamos uint32 porque packet.Stats.Drops es uint32
 		var lastDrops uint32 = 0
 
 		for {
 			select {
-			case <-stopChan:
+			case <-ctx.Done():
 				return
 			case <-ticker.C:
 				stats, err := conn.Stats()
 				if err == nil {
 					if stats.Drops > lastDrops {
 						delta := stats.Drops - lastDrops
-						telemetry.SocketDrops.Add(float64(delta))
-						// Opcional: Loguear si hay drops masivos
+						telemetry.SocketDrops.WithLabelValues(ifaceName).Add(float64(delta))
 						if delta > 100 {
-							log.Printf("⚠️ KERNEL DROPS DETECTED: %d packets lost (Buffer Full)", delta)
+							log.Printf("⚠️ [%s] KERNEL DROPS: %d packets lost", ifaceName, delta)
 						}
 						lastDrops = stats.Drops
 					}
@@ -89,47 +84,63 @@ func Run(cfg *config.Config, engine *detector.Engine, stopChan chan os.Signal) e
 		}
 	}()
 
-	// 6. Loop de Lectura (Hot Path)
+	// --- 2. SHUTDOWN BREAKER (LA SOLUCIÓN AL HANG) ---
+	// Esta goroutine espera la señal de cancelación y mata el socket.
+	// Esto hace que ReadFrom desbloquee inmediatamente con error.
 	go func() {
-		// Zero-Alloc: Buffer reutilizable
-		buf := make([]byte, cfg.Network.SnapLen)
-
-		for {
-			n, _, err := conn.ReadFrom(buf)
-			if err != nil {
-				if strings.Contains(err.Error(), "closed") {
-					return
-				}
-				log.Printf("⚠️ Error reading packet: %v", err)
-				continue
-			}
-
-			// --- INICIO CRONÓMETRO DE LATENCIA ---
-			start := time.Now()
-
-			// --- A. TELEMETRÍA (Observabilidad) ---
-			// Analizamos el paquete antes de cualquier otra cosa.
-			telemetry.TrackPacket(buf[:n], n)
-
-			// --- B. PARSING VLAN (Optimizado) ---
-			var vlanID uint16 = 0
-			if n >= 18 {
-				// Inline binary check
-				etherType := binary.BigEndian.Uint16(buf[12:14])
-				if etherType == 0x8100 {
-					vlanID = binary.BigEndian.Uint16(buf[14:16]) & 0x0FFF
-				}
-			}
-
-			// --- C. DISPATCH (Motor) ---
-			engine.DispatchPacket(buf[:n], n, vlanID)
-
-			// --- FIN CRONÓMETRO ---
-			duration := time.Since(start).Nanoseconds()
-			telemetry.ProcessingTime.Observe(float64(duration))
-		}
+		<-ctx.Done()
+		conn.Close() // <--- CRÍTICO: Fuerza el error en ReadFrom
 	}()
 
-	<-stopChan
-	return nil
+	// --- 3. LOOP DE LECTURA (HOT PATH) ---
+	buf := make([]byte, cfg.Network.SnapLen)
+
+	for {
+		// Ya no necesitamos select case <-ctx.Done() aquí al principio
+		// porque el error de ReadFrom manejará la salida.
+
+		// Mantenemos el Deadline para evitar zombies si el breaker fallara (defensa en profundidad)
+		conn.SetReadDeadline(time.Now().Add(1 * time.Second))
+		
+		n, _, err := conn.ReadFrom(buf)
+		if err != nil {
+			// Comprobamos si el error es porque cerramos el socket (shutdown limpio)
+			// Go suele devolver "use of closed network connection" o "file already closed"
+			if strings.Contains(err.Error(), "closed") {
+				return nil // Salida limpia inmediata
+			}
+
+			// Si es timeout, solo volvemos a intentar (el contexto se chequeará implicitamente al intentar leer de nuevo si está cerrado)
+			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+				// Verificamos contexto por si acaso fue un timeout natural justo durante el shutdown
+				select {
+				case <-ctx.Done():
+					return nil
+				default:
+					continue
+				}
+			}
+
+			log.Printf("⚠️ [%s] Read error: %v", ifaceName, err)
+			continue
+		}
+
+		// --- PROCESAMIENTO (Sin cambios) ---
+		start := time.Now()
+
+		telemetry.TrackPacket(ifaceName, buf[:n], n)
+
+		var vlanID uint16 = 0
+		if n >= 18 {
+			etherType := binary.BigEndian.Uint16(buf[12:14])
+			if etherType == 0x8100 {
+				vlanID = binary.BigEndian.Uint16(buf[14:16]) & 0x0FFF
+			}
+		}
+
+		engine.DispatchPacket(buf[:n], n, vlanID)
+
+		duration := time.Since(start).Nanoseconds()
+		telemetry.ProcessingTime.WithLabelValues(ifaceName).Observe(float64(duration))
+	}
 }

@@ -10,100 +10,89 @@ import (
 	"github.com/soyunomas/loopwarden/internal/notifier"
 )
 
-// Algorithm define la interfaz que deben cumplir todos los detectores
 type Algorithm interface {
 	Name() string
 	Start(conn *packet.Conn, iface *net.Interface) error
 	OnPacket(data []byte, length int, vlanID uint16)
 }
 
-// Engine es el orquestador
 type Engine struct {
 	algorithms []Algorithm
 	cfg        *config.AlgorithmConfig
 	mu         sync.RWMutex
+	ifaceName  string // Identidad del Engine
 }
 
-// NewEngine recibe el Notifier para pasárselo a los algoritmos
-func NewEngine(cfg *config.AlgorithmConfig, notify *notifier.Notifier) *Engine {
+// NewEngine propaga ifaceName a todos los constructores
+func NewEngine(cfg *config.AlgorithmConfig, notify *notifier.Notifier, ifaceName string) *Engine {
 	e := &Engine{
 		cfg:        cfg,
+		ifaceName:  ifaceName,
 		algorithms: make([]Algorithm, 0),
 	}
 
-	// 1. EtherFuse (Passive Payload Analysis)
+	// 1. EtherFuse
 	if cfg.EtherFuse.Enabled {
-		log.Println("✅ [Engine] Loaded: EtherFuse")
-		e.algorithms = append(e.algorithms, NewEtherFuse(&cfg.EtherFuse, notify))
+		e.algorithms = append(e.algorithms, NewEtherFuse(&cfg.EtherFuse, notify, ifaceName))
 	}
 
-	// 2. ActiveProbe (Injection)
+	// 2. ActiveProbe
 	if cfg.ActiveProbe.Enabled {
-		log.Println("✅ [Engine] Loaded: ActiveProbe")
-		e.algorithms = append(e.algorithms, NewActiveProbe(&cfg.ActiveProbe, notify))
+		e.algorithms = append(e.algorithms, NewActiveProbe(&cfg.ActiveProbe, notify, ifaceName))
 	}
 
-	// 3. MacStorm (Velocity)
+	// 3. MacStorm
 	if cfg.MacStorm.Enabled {
-		log.Println("✅ [Engine] Loaded: MacStorm")
-		e.algorithms = append(e.algorithms, NewMacStorm(&cfg.MacStorm, notify))
+		e.algorithms = append(e.algorithms, NewMacStorm(&cfg.MacStorm, notify, ifaceName))
 	}
 
-	// 4. FlapGuard (Topology)
+	// 4. FlapGuard
 	if cfg.FlapGuard.Enabled {
-		log.Println("✅ [Engine] Loaded: FlapGuard")
-		e.algorithms = append(e.algorithms, NewFlapGuard(&cfg.FlapGuard, notify))
+		e.algorithms = append(e.algorithms, NewFlapGuard(&cfg.FlapGuard, notify, ifaceName))
 	}
 
-	// 5. ArpWatchdog (ARP Storm)
+	// 5. ArpWatchdog
 	if cfg.ArpWatch.Enabled {
-		log.Println("✅ [Engine] Loaded: ArpWatchdog")
-		e.algorithms = append(e.algorithms, NewArpWatchdog(&cfg.ArpWatch, notify))
+		e.algorithms = append(e.algorithms, NewArpWatchdog(&cfg.ArpWatch, notify, ifaceName))
 	}
 
-	// --- NUEVOS MOTORES DE SEGURIDAD ---
-
-	// 6. DhcpHunter (Rogue DHCP)
+	// 6. DhcpHunter
 	if cfg.DhcpHunter.Enabled {
-		log.Println("✅ [Engine] Loaded: DhcpHunter (Rogue DHCP Detection)")
-		e.algorithms = append(e.algorithms, NewDhcpHunter(&cfg.DhcpHunter, notify))
+		e.algorithms = append(e.algorithms, NewDhcpHunter(&cfg.DhcpHunter, notify, ifaceName))
 	}
 
-	// 7. FlowPanic (Pause Frame Flood)
+	// 7. FlowPanic
 	if cfg.FlowPanic.Enabled {
-		log.Println("✅ [Engine] Loaded: FlowPanic (802.3x Pause Flood)")
-		e.algorithms = append(e.algorithms, NewFlowPanic(&cfg.FlowPanic, notify))
+		e.algorithms = append(e.algorithms, NewFlowPanic(&cfg.FlowPanic, notify, ifaceName))
 	}
 
-	// 8. RaGuard (IPv6 RA Security)
+	// 8. RaGuard
 	if cfg.RaGuard.Enabled {
-		log.Println("✅ [Engine] Loaded: RaGuard (IPv6 Rogue RA)")
-		e.algorithms = append(e.algorithms, NewRaGuard(&cfg.RaGuard, notify))
+		e.algorithms = append(e.algorithms, NewRaGuard(&cfg.RaGuard, notify, ifaceName))
 	}
 
-	// 9. McastPolicer (Multicast Storm)
+	// 9. McastPolicer
 	if cfg.McastPolicer.Enabled {
-		log.Println("✅ [Engine] Loaded: McastPolicer (Multicast Rate Limiter)")
-		e.algorithms = append(e.algorithms, NewMcastPolicer(&cfg.McastPolicer, notify))
+		e.algorithms = append(e.algorithms, NewMcastPolicer(&cfg.McastPolicer, notify, ifaceName))
 	}
 
+	log.Printf("✅ [Engine:%s] Initialized with %d algorithms", ifaceName, len(e.algorithms))
 	return e
 }
 
 func (e *Engine) StartAll(conn *packet.Conn, iface *net.Interface) {
 	for _, algo := range e.algorithms {
 		if err := algo.Start(conn, iface); err != nil {
-			log.Printf("❌ Error starting algorithm %s: %v", algo.Name(), err)
+			log.Printf("❌ [%s] Error starting algorithm %s: %v", e.ifaceName, algo.Name(), err)
 		}
 	}
 }
 
 func (e *Engine) DispatchPacket(data []byte, length int, vlanID uint16) {
 	e.mu.RLock()
-	defer e.mu.RUnlock()
-	
-	// Data-oriented: Iterate over contiguous memory (slice of interfaces)
+	// Precepto #41: Mid-stack inlining optimization
 	for _, algo := range e.algorithms {
 		algo.OnPacket(data, length, vlanID)
 	}
+	e.mu.RUnlock()
 }

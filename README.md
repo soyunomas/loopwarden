@@ -14,11 +14,14 @@ LoopWarden ejecuta **9 motores de detección concurrentes**. Cada uno busca una 
 ### 1. ActiveProbe (Inyección Activa Determinista) ⚡
 *El "Sonar" de la red. La única forma de tener 100% de certeza.*
 
-*   **🔬 Mecánica:** LoopWarden genera e inyecta una trama Ethernet unicast especialmente diseñada (con un EtherType `0xFFFF` configurable y un payload "mágico") cada segundo.
-*   **🛡️ Lógica de Detección:** Si esta trama, que salió por la interfaz `TX`, regresa a la interfaz `RX`, existe un camino físico cerrado sin lugar a dudas.
+*   **🔬 Mecánica:** LoopWarden genera e inyecta una trama Ethernet unicast especialmente diseñada (con un EtherType `0xFFFF` configurable y un payload "mágico" **firmado con la identidad de la interfaz**) cada segundo.
+*   **🛡️ Lógica de Detección:**
+    *   **Auto-Bucle:** Si la firma enviada por `eno1` regresa a `eno1`, existe un bucle físico cerrado local.
+    *   **Bucle Cruzado:** Si la firma enviada por `eno1` aparece en `eno2`, existe un puente físico crítico entre dos dominios de red separados.
 *   **💡 Valor Diferencial:** A diferencia de los métodos pasivos que "deducen" un bucle por volumen de tráfico, ActiveProbe lo **confirma físicamente**. Es inmune a falsos positivos causados por tráfico legítimo de alta carga.
 *   **🎯 Qué detecta:**
     *   ✅ **Bucles Físicos (Hard Loops):** Cable de parcheo conectado por error (boca a boca).
+    *   ✅ **Bucles Cruzados (Cross-Domain):** Conexión física accidental entre dos redes o VLANs distintas monitorizadas por el mismo servidor.
     *   ✅ **Fallos de STP:** Switches donde Spanning Tree ha fallado o tarda en converger.
 
 ### 2. EtherFuse (Análisis Pasivo de Payload) 🧬
@@ -100,6 +103,16 @@ LoopWarden ejecuta **9 motores de detección concurrentes**. Cada uno busca una 
 *   **🎯 Qué detecta:**
     *   ✅ **Tormentas de Clonación:** Software como FOG/Clonezilla mal configurado.
     *   ✅ **Fugas de Vídeo:** Cámaras IP o IPTV inundando puertos de acceso.
+    
+### 10. Multi-Stack Granular Tuning 🎛️
+*Configuración jerárquica por interfaz.*
+
+*   **🔬 Mecánica:** LoopWarden permite definir una política global de seguridad y aplicar **excepciones específicas** (Overrides) por interfaz.
+*   **🛡️ Lógica:**
+    *   **Global:** Define reglas estrictas para toda la red (ej: "Nadie puede escanear IPs").
+    *   **Local:** Relaja o endurece las reglas para puertos específicos (ej: "La interfaz `vlan_guest` puede hacer más peticiones ARP, pero `mgmt` tiene tolerancia cero").
+*   **💡 Valor Diferencial:** Permite desplegar una sola instancia de LoopWarden para monitorizar entornos heterogéneos (Servidores, IoT, Usuarios, Wi-Fi) sin generar falsos positivos en las zonas ruidosas.
+
 ---
 
 ### 📊 Telemetría y Observabilidad (Prometheus)
@@ -126,15 +139,23 @@ En una tormenta de broadcast, una red puede generar millones de eventos por segu
 *   **Adaptive Hysteresis:** Cada algoritmo tiene memoria. Si *FlapGuard* detecta un host inestable, te avisa una vez y luego guarda silencio por 30 segundos sobre ese host específico, manteniendo tus canales de comunicación limpios.
 *   **Integraciones:** Webhooks JSON (Slack, Discord, Mattermost, Google Chat, Rocket.Chat), **Telegram Bots**, Syslog (RFC 3164) y SMTP (Email).
 
+---
+
 ## ⚙️ Referencia de Configuración (`config.toml`)
 
 A continuación se detallan todos los parámetros disponibles en el archivo de configuración.
 
-### 🔌 Red y Alertas
+LoopWarden utiliza un sistema de **Herencia de Configuración** para gestionar múltiples interfaces:
+1.  **Valores Globales:** Se aplican por defecto a todas las interfaces.
+2.  **Overrides (Excepciones):** Definidos por interfaz dentro de cada algoritmo. Si existen, reemplazan al valor global (para números) o se suman a él (para listas).
+
+### 🔌 Sistema y Red
 
 | Sección | Parámetro | Default | Descripción |
 | :--- | :--- | :--- | :--- |
-| **[network]** | `interface` | `"eno1"` | **Crítico.** Nombre exacto de la interfaz de red a escuchar (ver `ip link`). |
+| **[system]** | `sensor_name` | `"LoopWarden"` | Identificador único del despliegue (ej: "Rack-A1"). Se añade a todas las alertas. |
+| | `log_file` | `""` | Ruta del archivo de log. Dejar vacío para consola o `/dev/null` para descartar. |
+| **[network]** | `interfaces` | `["eno1"]` | **Crítico.** Lista de interfaces a monitorizar simultáneamente (ej: `["eno1", "eno2"]`). Se crea un motor independiente para cada una. |
 | | `snaplen` | `2048` | Bytes a capturar por trama. |
 | **[alerts]** | `syslog_server` | `""` | Dirección `IP:Puerto` del servidor Syslog (UDP). |
 | **[alerts.webhook]** | `enabled` | `false` | Activa/Desactiva notificaciones vía Webhook. |
@@ -153,30 +174,51 @@ A continuación se detallan todos los parámetros disponibles en el archivo de c
 
 ### 🧠 Algoritmos de Detección
 
-| Sección | Parámetro | Default | Descripción |
-| :--- | :--- | :--- | :--- |
-| **[algorithms.etherfuse]** | `enabled` | `true` | Activa/Desactiva el análisis de rebote de payloads. |
-| | `history_size` | `4096` | Tamaño del buffer de memoria para hashes. Más tamaño = mayor ventana de tiempo. |
-| | `alert_threshold` | `50` | Cantidad de veces que un paquete debe repetirse para considerar bucle. |
-| | `storm_pps_limit` | `5000` | Umbral de PPS global para considerar que la red está bajo tormenta masiva. |
-| **[algorithms.active_probe]**| `enabled` | `true` | Activa/Desactiva la inyección activa de sondas. |
-| | `interval_ms` | `1000` | Frecuencia de envío de la sonda (milisegundos). |
-| | `ethertype` | `65535` | Tipo de protocolo Ethernet (0xFFFF) usado para la sonda. |
-| **[algorithms.mac_storm]** | `enabled` | `true` | Activa/Desactiva el limitador de velocidad por host. |
-| | `max_pps_per_mac`| `2000` | Máximo de paquetes/segundo permitidos por una única MAC antes de alertar. |
-| **[algorithms.flap_guard]**| `enabled` | `true` | Activa/Desactiva la detección de inestabilidad de VLANs. |
-| | `threshold` | `5` | Número de cambios de VLAN permitidos por segundo para una misma MAC. |
-| **[algorithms.arp_watch]** | `enabled` | `true` | Activa/Desactiva la monitorización específica de ARP. |
-| | `max_pps` | `500` | Límite global de peticiones ARP (`WHO-HAS`) por segundo en toda la interfaz. |
-| **[algorithms.dhcp_hunter]** | `enabled` | `true` | Detección de servidores DHCP Rogue. |
-| | `trusted_macs` | `[]` | Lista de MACs autorizadas para enviar DHCPOFFER. |
-| | `trusted_cidrs` | `[]` | Lista de redes (CIDR) autorizadas para enviar ofertas DHCP (ej: `["10.0.0.0/8"]`). |
-| **[algorithms.flow_panic]** | `enabled` | `true` | Detección de inundación de tramas PAUSE (802.3x). |
-| | `max_pause_pps` | `50` | Máximo de tramas de pausa por segundo antes de alertar fallo hardware/DoS. |
-| **[algorithms.ra_guard]** | `enabled` | `true` | Protección contra Rogue IPv6 Router Advertisements. |
-| | `trusted_macs` | `[]` | Únicas MACs permitidas para actuar como Router IPv6. |
-| **[algorithms.mcast_policer]**| `enabled` | `true` | Control de tráfico Multicast. |
-| | `max_pps` | `8000` | Límite global de paquetes multicast por segundo (Video/Clonación). |
+Esta tabla muestra los parámetros globales. **Nota:** La columna "Override" indica si el parámetro puede ser personalizado específicamente para una interfaz usando la sintaxis `[algorithms.X.overrides.interfaz]`.
+
+| Sección | Parámetro | Default | Override | Descripción |
+| :--- | :--- | :--- | :--- | :--- |
+| **[algorithms.etherfuse]** | `enabled` | `true` | No | Activa/Desactiva el análisis de rebote de payloads. |
+| | `history_size` | `4096` | ❌ No | Tamaño del buffer de memoria para hashes. Estático por alocación de RAM. |
+| | `alert_threshold` | `200` | ✅ Sí | Cantidad de veces que un paquete debe repetirse para considerar bucle. |
+| | `storm_pps_limit` | `15000` | ✅ Sí | Umbral de PPS global para considerar tormenta masiva. |
+| **[algorithms.active_probe]**| `enabled` | `true` | No | Activa/Desactiva la inyección activa de sondas. |
+| | `interval_ms` | `1000` | ✅ Sí | Frecuencia de envío de la sonda (milisegundos). |
+| | `ethertype` | `65535` | ❌ No | Protocolo Ethernet (0xFFFF) usado. Global para interoperabilidad. |
+| **[algorithms.mac_storm]** | `enabled` | `true` | No | Activa/Desactiva el limitador de velocidad por host. |
+| | `max_pps_per_mac`| `2000` | ✅ Sí | Máximo de paquetes/segundo permitidos por una única MAC. |
+| **[algorithms.flap_guard]**| `enabled` | `true` | No | Activa/Desactiva la detección de inestabilidad de VLANs. |
+| | `threshold` | `5` | ✅ Sí | Número de cambios de VLAN permitidos por segundo para una misma MAC. |
+| **[algorithms.arp_watch]** | `enabled` | `true` | No | Activa/Desactiva la monitorización específica de ARP. |
+| | `max_pps` | `500` | ✅ Sí | Límite global de peticiones ARP (`WHO-HAS`) por segundo. |
+| **[algorithms.dhcp_hunter]** | `enabled` | `true` | No | Detección de servidores DHCP Rogue. |
+| | `trusted_macs` | `[]` | ✅ Append | Lista de MACs autorizadas (Se suman Global + Override). |
+| | `trusted_cidrs` | `[]` | ✅ Append | Lista de redes (CIDR) autorizadas (Se suman Global + Override). |
+| **[algorithms.flow_panic]** | `enabled` | `true` | No | Detección de inundación de tramas PAUSE (802.3x). |
+| | `max_pause_pps` | `50` | ✅ Sí | Máximo de tramas de pausa por segundo antes de alertar fallo/DoS. |
+| **[algorithms.ra_guard]** | `enabled` | `true` | No | Protección contra Rogue IPv6 Router Advertisements. |
+| | `trusted_macs` | `[]` | ✅ Append | Únicas MACs permitidas para actuar como Router IPv6 (Aditivo). |
+| **[algorithms.mcast_policer]**| `enabled` | `true` | No | Control de tráfico Multicast. |
+| | `max_pps` | `8000` | ✅ Sí | Límite global de paquetes multicast por segundo. |
+
+#### Ejemplo de Configuración con Overrides
+
+```toml
+[algorithms.mac_storm]
+enabled = true
+max_pps_per_mac = 1000  # Límite estricto por defecto (Servidores)
+
+    # Excepción para Wi-Fi (wifi0): Más tolerante con usuarios
+    [algorithms.mac_storm.overrides.wifi0]
+    max_pps_per_mac = 5000
+
+[algorithms.dhcp_hunter]
+trusted_macs = ["AA:BB:CC:DD:EE:FF"] # DHCP Corporativo (Global)
+
+    # Excepción para Laboratorio (eno2): Permite DHCP extra
+    [algorithms.dhcp_hunter.overrides.eno2]
+    trusted_macs = ["00:11:22:33:44:55"] # Resultado en eno2: Global + Local
+```
 
 ### 📊 Telemetría
 
@@ -184,6 +226,115 @@ A continuación se detallan todos los parámetros disponibles en el archivo de c
 | :--- | :--- | :--- | :--- |
 | **[telemetry]** | `enabled` | `true` | Activa el servidor HTTP de métricas Prometheus. |
 | | `listen_address` | `":9090"` | Interfaz y puerto de escucha (ej: `127.0.0.1:9090` para local, `:9090` para todo). |
+
+## 🎚️ Guía de Tuning y Calibración
+
+LoopWarden viene configurado por defecto para entornos de tamaño medio (Oficinas/PyMEs). En entornos de alta densidad como **Centros Educativos, Universidades o Data Centers**, es necesario ajustar los umbrales para diferenciar tráfico legítimo de anomalías.
+
+Usa esta guía para ajustar `config.toml` según el comportamiento de tu red.
+
+### Estrategia de Configuración (Global vs Local)
+
+Antes de ajustar los números, decide tu estrategia de despliegue para mantener el archivo `config.toml` mantenible.
+
+1.  **La Regla del 80/20:** Configura los valores **Globales** pensando en tus servidores críticos o infraestructura core (donde quieres silencio absoluto y detección rápida). Esto cubrirá el 80% de tus puertos.
+2.  **El "Pozo de Ruido":** Identifica las interfaces que conectan a redes de Usuarios, Wi-Fi de invitados o Laboratorios. Estas redes son ruidosas por naturaleza (mDNS, Broadcasts de Windows, Consolas).
+    *   **No subas el límite global** para acomodar a los usuarios, o dejarás desprotegidos a los servidores.
+    *   **Usa Overrides:** Crea una entrada específica para esa interfaz ruidosa:
+        ```toml
+        [algorithms.arp_watch.overrides.vlan_invitados]
+        max_pps = 2000 # Permitir escaneos de descubrimiento en Wi-Fi
+        ```
+3.  **ActiveProbe en Core vs Acceso:**
+    *   En enlaces **Core (10Gbps)**, usa un intervalo lento (ej: `5000ms`) para no saturar logs o gráficas.
+    *   En enlaces de **Acceso**, usa un intervalo rápido (ej: `override interval_ms = 500`) para detectar el bucle en cuanto el usuario conecte mal el cable.
+
+### 🧬 EtherFuse (Detección de Rebotes)
+*Detecta paquetes duplicados idénticos.*
+
+*   **`history_size` (Memoria de Hashes)**
+    *   **📈 CUÁNDO SUBIR (ej: 8192 o 16384):**
+        *   **Síntoma:** Bucles lentos o "Soft Loops" en redes muy grandes que no son detectados.
+        *   **Causa:** En redes con mucho tráfico, el buffer circular se sobrescribe demasiado rápido antes de que el paquete duplicado vuelva. Aumentar esto consume más RAM pero "recuerda" los paquetes durante más tiempo.
+    *   **📉 CUÁNDO BAJAR (ej: 1024):**
+        *   **Síntoma:** Despliegues en hardware muy limitado (routers embebidos con poca RAM).
+*   **`alert_threshold` (Sensibilidad de Repetición)**
+    *   **📈 CUÁNDO SUBIR (ej: 200-500):**
+        *   **Síntoma:** Alertas intermitentes sin caída de red.
+        *   **Causa:** Software de aula (control de profesores), mDNS (Apple/Chromecast) o aplicaciones P2P en la LAN que envían el mismo payload muchas veces legítimamente.
+    *   **📉 CUÁNDO BAJAR (ej: 20-50):**
+        *   **Síntoma:** La red se vuelve lenta antes de que LoopWarden avise.
+        *   **Causa:** Bucles lejanos con mucha atenuación o pérdida de paquetes.
+*   **`storm_pps_limit` (Pánico Global)**
+    *   **📈 CUÁNDO SUBIR (ej: 30000):**
+        *   **Síntoma:** Alertas de "GLOBAL STORM" durante el inicio de jornada escolar o laboral.
+        *   **Causa:** Cientos de dispositivos conectándose y haciendo Broadcast a la vez.
+
+### ⚡ ActiveProbe (Sonda Activa)
+*Inyección de tráfico para confirmación física.*
+
+*   **`interval_ms` (Frecuencia de Sondeo)**
+    *   **📈 CUÁNDO SUBIR (ej: 2000 ms):**
+        *   **Síntoma:** Alto uso de CPU en el servidor LoopWarden o deseo de minimizar el ruido en capturas de Wireshark.
+    *   **📉 CUÁNDO BAJAR (ej: 200-500 ms):**
+        *   **Síntoma:** Protección de equipos críticos donde un bucle de 1 segundo es inaceptable. Detección casi instantánea.
+
+### 🌪️ MacStorm (Límite por Host)
+*Evita que una sola tarjeta de red sature el medio.*
+
+*   **`max_pps_per_mac` (Velocidad Unicast)**
+    *   **📈 CUÁNDO SUBIR (ej: 5000-8000):**
+        *   **Síntoma:** Alertas sobre Servidores de Backups, NAS, NVRs de cámaras o servidores de clonación de imágenes.
+        *   **Causa:** Transferencias de archivos masivas o tráfico legítimo de alta densidad.
+    *   **📉 CUÁNDO BAJAR (ej: 1000):**
+        *   **Síntoma:** Necesidad estricta de control de tráfico en redes de invitados o IoT.
+
+### 🦇 FlapGuard (Baile de VLANs)
+*Detecta cambios rápidos de puerto/VLAN.*
+
+*   **`threshold` (Movimientos por Segundo)**
+    *   **📈 CUÁNDO SUBIR (ej: 20):**
+        *   **Síntoma:** Alertas sobre usuarios WiFi (Roaming) o Servidores con LACP/Bonding.
+        *   **Causa:** El cliente salta de AP rápidamente o el servidor balancea la carga entre interfaces físicas.
+    *   **📉 CUÁNDO BAJAR (ej: 2-3):**
+        *   **Síntoma:** Entornos estáticos (Datacenter) donde un cable nunca debe moverse. Detección inmediata de errores de cableado.
+
+### 🐶 ArpWatchdog (Tormenta ARP)
+*Monitoriza peticiones de resolución de direcciones.*
+
+*   **`max_pps` (Peticiones Globales)**
+    *   **📈 CUÁNDO SUBIR (ej: 2000):**
+        *   **Síntoma:** Falsos positivos a primera hora de la mañana.
+        *   **Causa:** Encendido masivo de aulas/oficinas (Boot Storm).
+    *   **📉 CUÁNDO BAJAR (ej: 100):**
+        *   **Síntoma:** Redes pequeñas o de seguridad crítica. Detecta escaneos de red (`nmap`) muy rápidamente.
+
+### 🦈 DhcpHunter y 📡 RaGuard (Seguridad)
+*Listas Blancas de Infraestructura.*
+
+*   **`trusted_macs` / `trusted_cidrs`**
+    *   **Acción:** No son umbrales numéricos. Aquí debes añadir **EXPLICITAMENTE** las MACs de tus servidores DHCP legítimos y Routers. Cualquier cosa que no esté en esta lista y actúe como servidor, generará una alerta inmediata.
+
+### ⏸️ FlowPanic (Tramas de Pausa)
+*Salud Hardware y DoS.*
+
+*   **`max_pause_pps`**
+    *   **📈 CUÁNDO SUBIR (ej: 200):**
+        *   **Síntoma:** Switches antiguos o enlaces muy saturados que usan Flow Control agresivamente.
+    *   **📉 CUÁNDO BAJAR (ej: 10):**
+        *   **Síntoma:** Quieres saber inmediatamente si una tarjeta de red o cable está defectuoso y negociando mal.
+
+### 👻 McastPolicer (Tormenta Multicast)
+*Control de tráfico de vídeo y clonación.*
+
+*   **`max_pps`**
+    *   **📈 CUÁNDO SUBIR (ej: 20000+):**
+        *   **Síntoma:** Alertas al usar software de clonación (FOG, Clonezilla) o Videoconferencia HD.
+        *   **Causa:** El tráfico Multicast es la base de estas herramientas.
+    *   **📉 CUÁNDO BAJAR (ej: 1000):**
+        *   **Síntoma:** La red WiFi colapsa pero la cableada no.
+        *   **Causa:** El tráfico Multicast inunda el espectro aéreo (se transmite a velocidad base). Bajar esto protege la WiFi.
+
 
 ## 🚨 Playbook de Respuesta a Incidentes
 
@@ -275,40 +426,38 @@ Para interfaces de red de alta velocidad (10Gbps o superior) en entornos de alta
 
 ## 🏗️ Arquitectura "Fast-Path"
 
-LoopWarden está diseñado para procesar tráfico a velocidad de línea sin ahogar la CPU:
+LoopWarden está diseñado para procesar tráfico a velocidad de línea sin ahogar la CPU, utilizando una arquitectura de **Stacks Paralelos (Shared-Nothing)** para gestionar múltiples interfaces sin contención de bloqueos (Lock Contention):
 
 ```text
-[ NETWORK WIRE ] <=== (10Gbps+)
+[ NETWORK WIRE ] <=== (Multiple Interfaces: eno1, eno2...)
       ||
 [ NIC HARDWARE ]
       ||
-[ KERNEL RING ] <--- (AF_PACKET RX_RING)
+[ KERNEL RING ] <--- (AF_PACKET RX_RING per Interface)
       ||
 [ BPF FILTER ]  <--- "Drop Unicast. Keep Broadcast/Multicast/ARP/Tagged/Control"
       ||
-[ GO RUNTIME ]  <--- (Zero-Copy Read)
+[ GO RUNTIME ]  <--- (Parallel Stacks)
       ||
-      +--> [ Engine ] (Parallel Processing)
+      +--> [ Engine Stack 1 (eno1) ]
+      |      ||
+      |      +-- 1. ActiveProbe (Identity Injection: "Magic|eno1")
+      |      +-- 2. EtherFuse (Local State & Overrides)
+      |      +-- ... (All Engines)
+      |
+      +--> [ Engine Stack 2 (eno2) ]
              ||
-             +-- 1. ActiveProbe (Injection)
-             +-- 2. EtherFuse (Payload Hash)
-             +-- 3. MacStorm (Velocity Check)
-             +-- 4. FlapGuard (Topology Check)
-             +-- 5. ArpWatchdog (Protocol Check)
-             +-- 6. DhcpHunter (Rogue Server Check)
-             +-- 7. FlowPanic (PAUSE Frame Check)
-             +-- 8. RaGuard (IPv6 RA Check)
-             +-- 9. McastPolicer (Multicast Rate)
+             +-- 1. ActiveProbe (Identity Injection: "Magic|eno2")
+             +-- 2. EtherFuse (Local State & Overrides)
+             +-- ... (All Engines)
              ||
-[ NOTIFIER ] <-- (Global Deduplication & Throttling)
+[ NOTIFIER ] <-- (Centralized Deduplication & Throttling)
       ||
-[ ALERTS ] ----> Slack / Syslog / Email
+[ ALERTS ] ----> Slack / Syslog / Email (Tagged with [SensorName])
 ```
 
-> **⚠️ Nota Técnica sobre Visibilidad (Unicast vs Broadcast):**
-> Para garantizar un rendimiento extremo y proteger la CPU en enlaces de 10Gbps, LoopWarden aplica un filtro BPF estricto en el Kernel que **descarta todo el tráfico Unicast general**.
->
-> Esto implica un compromiso de diseño: los motores de seguridad (como *DhcpHunter* o *MacStorm*) detectan amenazas que impactan el dominio de difusión global (Broadcast/Multicast). Un ataque dirigido estrictamente Unicast (ej: un DHCP Offer enviado directamente a la MAC del cliente sin usar broadcast, o un DoS UDP hacia una sola IP) será descartado por el Kernel para preservar recursos. LoopWarden prioriza la estabilidad de la Capa 2 (bucles y tormentas) sobre la inspección profunda (DPI) de tráfico usuario a usuario.
+> **⚠️ Nota Técnica sobre Rendimiento (Kernel BPF):**
+> LoopWarden utiliza Filtros BPF en Kernel-Space (cBPF JIT). Esto descarta el tráfico Unicast irrelevante antes de que cruce la frontera User-Space, evitando cambios de contexto costosos y garantizando el procesamiento a velocidad de línea sin saturar la CPU.
 
 
 ## 📜 Licencia

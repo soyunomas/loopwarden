@@ -14,7 +14,7 @@ import (
 // Helper para crear un Dummy Notifier
 func mockNotifier() *notifier.Notifier {
 	cfg := &config.AlertsConfig{}
-	return notifier.NewNotifier(cfg)
+	return notifier.NewNotifier(cfg, "TEST_SENSOR")
 }
 
 // =============================================================================
@@ -28,11 +28,16 @@ func TestEtherFuse_Detection(t *testing.T) {
 		HistorySize:    10,
 		AlertThreshold: threshold,
 		StormPPSLimit:  1000,
+		Overrides:      make(map[string]config.EtherFuseOverride),
 	}
 
-	ef := NewEtherFuse(cfg, mockNotifier())
-	packet := []byte("PAYLOAD_TEST")
+	// UPDATED: Added "test0" ifaceName
+	ef := NewEtherFuse(cfg, mockNotifier(), "test0")
 	
+	dummyIface := &net.Interface{Name: "eth0"}
+	ef.Start(nil, dummyIface)
+
+	packet := []byte("PAYLOAD_TEST")
 	expectedHash := hashBody(packet)
 
 	// 1. Primer paquete: Se registra en la tabla con count=1
@@ -78,10 +83,15 @@ func TestEtherFuse_Detection(t *testing.T) {
 func TestMacStorm_Counter(t *testing.T) {
 	cfg := &config.MacStormConfig{
 		Enabled:      true,
-		MaxPPSPerMac: 100, 
+		MaxPPSPerMac: 100,
+		Overrides:    make(map[string]config.MacStormOverride),
 	}
 
-	ms := NewMacStorm(cfg, mockNotifier())
+	// UPDATED: Added "test0" ifaceName
+	ms := NewMacStorm(cfg, mockNotifier(), "test0")
+	
+	dummyIface := &net.Interface{Name: "eth0"}
+	ms.Start(nil, dummyIface)
 
 	srcMac := []byte{0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF}
 	packet := make([]byte, 14)
@@ -118,23 +128,26 @@ func TestActiveProbe_VlanOffset(t *testing.T) {
 		Enabled:      true,
 		Ethertype:    0xFFFF,
 		MagicPayload: "MAGIC",
+		Overrides:    make(map[string]config.ActiveProbeOverride),
 	}
 
-	ap := NewActiveProbe(cfg, mockNotifier())
+	// Ya tenía ifaceName, mantenemos consistencia
+	ap := NewActiveProbe(cfg, mockNotifier(), "test_iface")
 	myMac, _ := net.ParseMAC("00:11:22:33:44:55")
 	ap.myMAC = myMac
+	ap.ethertype = 0xFFFF 
+	ap.intervalMs = 1000
 
 	typeBytes := make([]byte, 2)
 	binary.BigEndian.PutUint16(typeBytes, 0xFFFF)
 
-	// Paquete NATIVO (Sin Tag)
 	packetNative := make([]byte, 0)
 	packetNative = append(packetNative, []byte{0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF}...) 
 	packetNative = append(packetNative, myMac...)                                       
 	packetNative = append(packetNative, typeBytes...)                                   
-	packetNative = append(packetNative, []byte("MAGIC")...)                             
+	packetNative = append(packetNative, []byte("MAGIC|test_iface")...)                          
 
-	ap.lastAlert = time.Time{} // Reset time
+	ap.lastAlert = time.Time{}
 	ap.OnPacket(packetNative, len(packetNative), 0)
 
 	ap.mu.Lock()
@@ -153,28 +166,27 @@ func TestFlapGuard_Flapping(t *testing.T) {
 	cfg := &config.FlapGuardConfig{
 		Enabled:   true,
 		Threshold: threshold,
+		Overrides: make(map[string]config.FlapGuardOverride),
 	}
 
-	fg := NewFlapGuard(cfg, mockNotifier())
+	// UPDATED: Added "test0" ifaceName
+	fg := NewFlapGuard(cfg, mockNotifier(), "test0")
+	
+	dummyIface := &net.Interface{Name: "eth0"}
+	fg.Start(nil, dummyIface)
 
-	// Host problemático
 	srcMac := []byte{0xCA, 0xFE, 0xBA, 0xBE, 0x00, 0x01}
 	
-	// Construir paquete base
 	packet := make([]byte, 14)
 	copy(packet[6:12], srcMac)
 
-	// Simular Flapping rápido: VLAN 10 -> VLAN 20 -> VLAN 10 -> VLAN 20
-	// Salto 1: Aparece en VLAN 10
+	// Salto 1
 	fg.OnPacket(packet, 14, 10)
-	
-	// Salto 2: Aparece en VLAN 20 (Count = 1)
+	// Salto 2
 	fg.OnPacket(packet, 14, 20)
-
-	// Salto 3: Aparece en VLAN 10 (Count = 2)
+	// Salto 3
 	fg.OnPacket(packet, 14, 10)
-
-	// Salto 4: Aparece en VLAN 20 (Count = 3 -> TRIGGER)
+	// Salto 4 (Trigger)
 	fg.OnPacket(packet, 14, 20)
 
 	var key [6]byte
@@ -184,7 +196,6 @@ func TestFlapGuard_Flapping(t *testing.T) {
 	entry := fg.registry[key]
 	fg.mu.Unlock()
 
-	// Verificaciones
 	if entry.flapCount < uint16(threshold) {
 		t.Errorf("El contador de Flap debería ser al menos %d, es %d", threshold, entry.flapCount)
 	}
@@ -199,58 +210,51 @@ func TestFlapGuard_Flapping(t *testing.T) {
 // =============================================================================
 
 func TestArpWatchdog_ParserAndLimit(t *testing.T) {
-	// IMPORTANTE: ArpWatchdog resetea cada segundo. 
-	// Para testear el límite, debemos inyectar rápido y luego forzar el chequeo.
-	
 	maxPPS := uint64(10)
 	cfg := &config.ArpWatchConfig{
-		Enabled: true,
-		MaxPPS:  maxPPS,
+		Enabled:   true,
+		MaxPPS:    maxPPS,
+		Overrides: make(map[string]config.ArpWatchOverride),
 	}
 
-	aw := NewArpWatchdog(cfg, mockNotifier())
-
-	// Construir Paquete ARP Request (Who-Has)
-	// Eth Header (14) + ARP (28)
-	// ARP Request: OpCode está en byte 20-21 del ARP header, o 6-7 desde inicio ARP
-	// Offset global: 14 (eth) + 6 = 20.
+	// UPDATED: Added "test0" ifaceName
+	aw := NewArpWatchdog(cfg, mockNotifier(), "test0")
 	
-	// EtherType 0x0806
+	dummyIface := &net.Interface{Name: "eth0"}
+	aw.Start(nil, dummyIface)
+
 	ethPacket := make([]byte, 14+28)
 	binary.BigEndian.PutUint16(ethPacket[12:14], 0x0806) // EtherType ARP
-	
-	// ARP OpCode: 1 (Request) en posición 20,21
-	binary.BigEndian.PutUint16(ethPacket[20:22], 1) 
+	binary.BigEndian.PutUint16(ethPacket[20:22], 1) // OpCode Request
 
-	// 1. Inyectar 'maxPPS + 5' paquetes rápidamente
 	for i := 0; i < int(maxPPS)+5; i++ {
 		aw.OnPacket(ethPacket, len(ethPacket), 0)
 	}
 
 	aw.mu.Lock()
-	count := aw.packetCount
+	var count uint64
+	for _, stats := range aw.sources {
+		count += stats.pps
+	}
 	aw.mu.Unlock()
 
 	if count != maxPPS+5 {
 		t.Errorf("Esperaba contar %d paquetes ARP, conté %d", maxPPS+5, count)
 	}
 
-	// 2. Verificar filtrado de OpCode (No contar ARP Reply = 2)
 	binary.BigEndian.PutUint16(ethPacket[20:22], 2) // Reply
 	aw.OnPacket(ethPacket, len(ethPacket), 0)
 
 	aw.mu.Lock()
-	countAfterReply := aw.packetCount
+	var countAfterReply uint64
+	for _, stats := range aw.sources {
+		countAfterReply += stats.pps
+	}
 	aw.mu.Unlock()
 
 	if countAfterReply != count {
 		t.Error("ArpWatchdog contó erróneamente un ARP Reply como Request")
 	}
-
-	// NOTA: No testeamos el disparo de la alerta aquí porque requiere esperar
-	// time.Sleep(1 * time.Second) para que la lógica de ventana temporal se active,
-	// lo cual ralentizaría los tests unitarios. Con verificar el conteo es suficiente
-	// para validar la lógica del parser.
 }
 
 // =============================================================================
@@ -263,8 +267,12 @@ func BenchmarkEtherFuse_OnPacket(b *testing.B) {
 		HistorySize:    4096,
 		AlertThreshold: 5000000, 
 		StormPPSLimit:  10000000,
+		Overrides:      make(map[string]config.EtherFuseOverride),
 	}
-	ef := NewEtherFuse(cfg, mockNotifier())
+	// UPDATED
+	ef := NewEtherFuse(cfg, mockNotifier(), "bench")
+	ef.Start(nil, &net.Interface{Name: "bench"})
+
 	packet := bytes.Repeat([]byte("A"), 64)
 	
 	b.ResetTimer()
@@ -279,8 +287,12 @@ func BenchmarkMacStorm_OnPacket(b *testing.B) {
 	cfg := &config.MacStormConfig{
 		Enabled:      true,
 		MaxPPSPerMac: 50000000, 
+		Overrides:    make(map[string]config.MacStormOverride),
 	}
-	ms := NewMacStorm(cfg, mockNotifier())
+	// UPDATED
+	ms := NewMacStorm(cfg, mockNotifier(), "bench")
+	ms.Start(nil, &net.Interface{Name: "bench"})
+	
 	packet := make([]byte, 64)
 	copy(packet[6:12], []byte{0x01, 0x02, 0x03, 0x04, 0x05, 0x06})
 
@@ -293,17 +305,18 @@ func BenchmarkMacStorm_OnPacket(b *testing.B) {
 }
 
 func BenchmarkFlapGuard_OnPacket(b *testing.B) {
-	cfg := &config.FlapGuardConfig{Enabled: true, Threshold: 10000}
-	fg := NewFlapGuard(cfg, mockNotifier())
+	cfg := &config.FlapGuardConfig{Enabled: true, Threshold: 10000, Overrides: make(map[string]config.FlapGuardOverride)}
+	// UPDATED
+	fg := NewFlapGuard(cfg, mockNotifier(), "bench")
+	fg.Start(nil, &net.Interface{Name: "bench"})
+	
 	packet := make([]byte, 64)
-	// MAC Fija
 	copy(packet[6:12], []byte{0xAA, 0xBB, 0xCC, 0x00, 0x00, 0x01})
 
 	b.ResetTimer()
 	b.ReportAllocs()
 
 	for i := 0; i < b.N; i++ {
-		// Alternar VLANs para forzar lógica de actualización
 		vlan := uint16(i % 2)
 		fg.OnPacket(packet, 64, vlan)
 	}
@@ -314,25 +327,23 @@ func BenchmarkActiveProbe_OnPacket(b *testing.B) {
 		Enabled:      true,
 		Ethertype:    0xFFFF,
 		MagicPayload: "BENCHMARK_PAYLOAD",
+		Overrides:    make(map[string]config.ActiveProbeOverride),
 	}
-	// Mock notifier
-	ap := NewActiveProbe(cfg, mockNotifier())
+	// UPDATED
+	ap := NewActiveProbe(cfg, mockNotifier(), "bench")
 	
-	// Configuramos nuestra MAC para que el detector crea que el paquete es nuestro
-	myMac, _ := net.ParseMAC("00:11:22:33:44:55")
-	ap.myMAC = myMac
-
-	// Pre-calculamos el paquete para no medir la creación, solo la detección
+	ap.myMAC, _ = net.ParseMAC("00:11:22:33:44:55")
+	ap.ethertype = 0xFFFF
+	
 	typeBytes := make([]byte, 2)
 	binary.BigEndian.PutUint16(typeBytes, 0xFFFF)
 	
 	packet := make([]byte, 0, 64)
-	packet = append(packet, []byte{0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF}...) // Dst Broadcast
-	packet = append(packet, myMac...)                                       // Src (Nosotros)
-	packet = append(packet, typeBytes...)                                   // EtherType
-	packet = append(packet, []byte("BENCHMARK_PAYLOAD")...)                 // Payload
+	packet = append(packet, []byte{0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF}...) 
+	packet = append(packet, ap.myMAC...)                                    
+	packet = append(packet, typeBytes...)                                   
+	packet = append(packet, []byte("BENCHMARK_PAYLOAD")...)                 
 	
-	// Rellenar hasta 64 bytes para realismo
 	padding := make([]byte, 64-len(packet))
 	packet = append(packet, padding...)
 
@@ -340,23 +351,22 @@ func BenchmarkActiveProbe_OnPacket(b *testing.B) {
 	b.ReportAllocs()
 
 	for i := 0; i < b.N; i++ {
-		// Pasamos VlanID 0 (Native)
 		ap.OnPacket(packet, len(packet), 0)
 	}
 }
 
 func BenchmarkArpWatchdog_OnPacket(b *testing.B) {
 	cfg := &config.ArpWatchConfig{
-		Enabled: true,
-		MaxPPS:  100000000, // Límite absurdo para no triggerear lógica de tiempo en bench
+		Enabled:   true,
+		MaxPPS:    100000000, 
+		Overrides: make(map[string]config.ArpWatchOverride),
 	}
-	aw := NewArpWatchdog(cfg, mockNotifier())
+	// UPDATED
+	aw := NewArpWatchdog(cfg, mockNotifier(), "bench")
+	aw.Start(nil, &net.Interface{Name: "bench"})
 
-	// Construimos un paquete ARP Request válido
 	packet := make([]byte, 64)
-	// EtherType ARP (0x0806) en bytes 12-13
 	binary.BigEndian.PutUint16(packet[12:14], 0x0806)
-	// OpCode Request (1) en bytes 20-21 (14 header + 6 offset ARP)
 	binary.BigEndian.PutUint16(packet[20:22], 1)
 
 	b.ResetTimer()

@@ -2,12 +2,22 @@
 #  🛡️  LoopWarden Configuration
 # ==============================================================================
 
+[system]
+# Identificador único de este despliegue (útil para saber de qué rack viene la alerta)
+sensor_name = "LoopWarden-Core-Stack"
+
+# Archivo de logs. Usa "" para consola o "/dev/null" para descartar.
+log_file = "loopwarden.log"
+
 [network]
-interface = "eno1"
+# ⚠️ CAMBIO CRÍTICO: Ahora es una lista de interfaces.
+# LoopWarden levantará un motor de detección independiente para cada una.
+interfaces = ["eno1", "eno2", "vlan10"] 
+
+# Longitud de captura (SnapShot Length). 2048 bytes es suficiente para cabeceras + payload.
 snaplen = 2048
 
 [alerts]
-# Syslog se mantiene simple
 syslog_server = ""  # Ej: "192.168.1.50:514"
 
 # --- Webhook (Slack/Teams/Discord) ---
@@ -45,8 +55,8 @@ chat_id = ""
     enabled = true
     interval_ms = 1000
     ethertype = 65535
-    magic_payload = "LOOPWARDEN_PROBE"
-    target_mac = "" # Opcional: "FF:FF:FF:FF:FF:FF" para broadcast, o una MAC unicast específica.
+    magic_payload = "LOOPWARDEN_PROBE" # El sistema añadirá "|eno1" automáticamente.
+    target_mac = "" 
 
     # --- ALGORITMO 3: MAC Storm ---
     [algorithms.mac_storm]
@@ -64,34 +74,27 @@ chat_id = ""
     max_pps = 500
 
     # --- ALGORITMO 6: DhcpHunter ---
-    # Detecta servidores DHCP no autorizados.
     [algorithms.dhcp_hunter]
     enabled = true
-    # MACs de tus servidores DHCP legítimos (Ej: Gateway, Windows Server)
     trusted_macs = ["00:15:5d:01:02:03", "aa:bb:cc:dd:ee:ff"] 
-    # Rangos de IP desde donde es válido recibir DHCP Offers.
     trusted_cidrs = ["192.168.1.0/24", "10.0.0.0/8"]
 
     # --- ALGORITMO 7: FlowPanic ---
-    # Detecta inundación de tramas PAUSE (802.3x), síntoma de NIC averiada o saturación.
     [algorithms.flow_panic]
     enabled = true
-    max_pause_pps = 50 # 50/segundo es muy alto para tráfico normal.
+    max_pause_pps = 50 
 
     # --- ALGORITMO 8: RaGuard ---
-    # Detecta Routers IPv6 no autorizados (protección contra MITM en IPv6).
     [algorithms.ra_guard]
     enabled = true
-    trusted_macs = ["aa:bb:cc:dd:ee:ff"] # Solo la MAC del Gateway/Firewall.
+    trusted_macs = ["aa:bb:cc:dd:ee:ff"] 
 
     # --- ALGORITMO 9: McastPolicer ---
-    # Limita el tráfico Multicast global (ej: streaming, clonación).
     [algorithms.mcast_policer]
     enabled = true
     max_pps = 8000
 
 # --- TELEMETRÍA Y OBSERVABILIDAD ---
-# Expone métricas Prometheus en /metrics
 [telemetry]
 enabled = true
-listen_address = ":9090" # Ej: ":9090" (Todo), "127.0.0.1:9090" (Solo local)
+listen_address = ":9090"

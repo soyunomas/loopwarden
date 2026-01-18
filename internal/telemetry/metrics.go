@@ -16,60 +16,65 @@ var sizeBuckets = []float64{60, 64, 128, 256, 512, 1024, 1518, 9000}
 
 var (
 	// 1. VOLUMEN DE TRÁFICO
-	// Cardinalidad controlada: ethertype y cast son finitos.
+	// Etiquetas: interface, ethertype, cast
 	RxPackets = promauto.NewCounterVec(prometheus.CounterOpts{
 		Name: "loopwarden_rx_packets_total",
-		Help: "Total packets processed by protocol and cast type",
-	}, []string{"ethertype", "cast"})
+		Help: "Total packets processed by interface, protocol and cast type",
+	}, []string{"interface", "ethertype", "cast"})
 
 	RxBytes = promauto.NewCounterVec(prometheus.CounterOpts{
 		Name: "loopwarden_rx_bytes_total",
-		Help: "Total bytes processed by protocol",
-	}, []string{"ethertype"})
+		Help: "Total bytes processed by interface and protocol",
+	}, []string{"interface", "ethertype"})
 
 	// 2. DETECCIONES DEL MOTOR
+	// Etiquetas: interface, engine, threat_type
 	EngineHits = promauto.NewCounterVec(prometheus.CounterOpts{
 		Name: "loopwarden_engine_hits_total",
 		Help: "Alerts triggered by detection engines",
-	}, []string{"engine", "threat_type"})
+	}, []string{"interface", "engine", "threat_type"})
 
 	// 3. LATENCIA DE PROCESAMIENTO
-	ProcessingTime = promauto.NewHistogram(prometheus.HistogramOpts{
+	// Etiquetas: interface
+	ProcessingTime = promauto.NewHistogramVec(prometheus.HistogramOpts{
 		Name:    "loopwarden_processing_ns",
 		Help:    "Time taken to process a packet in nanoseconds",
 		Buckets: processingBuckets,
-	})
+	}, []string{"interface"})
 
 	// 4. SALUD DEL SOCKET (KERNEL DROPS)
-	// Crítico para saber si estamos ciegos ante una tormenta.
-	SocketDrops = promauto.NewCounter(prometheus.CounterOpts{
+	// Etiquetas: interface
+	SocketDrops = promauto.NewCounterVec(prometheus.CounterOpts{
 		Name: "loopwarden_socket_drops_total",
 		Help: "Number of packets dropped by the kernel interface driver due to buffer overflow",
-	})
+	}, []string{"interface"})
 
 	// 5. PERFIL DE TAMAÑO
-	PacketSizes = promauto.NewHistogram(prometheus.HistogramOpts{
+	// Etiquetas: interface
+	PacketSizes = promauto.NewHistogramVec(prometheus.HistogramOpts{
 		Name:    "loopwarden_packet_size_bytes",
 		Help:    "Distribution of packet sizes in bytes",
 		Buckets: sizeBuckets,
-	})
+	}, []string{"interface"})
 
 	// 6. FORENSE ARP
+	// Etiquetas: interface, operation
 	ArpOps = promauto.NewCounterVec(prometheus.CounterOpts{
 		Name: "loopwarden_arp_ops_total",
 		Help: "ARP operations breakdown (request/reply)",
-	}, []string{"operation"})
+	}, []string{"interface", "operation"})
 )
 
 // TrackPacket analiza el paquete RAW y actualiza métricas.
+// AHORA requiere ifaceName.
 // OPTIMIZACIÓN: Zero-alloc. Lee bytes directamente sin crear objetos intermedios.
-func TrackPacket(data []byte, length int) {
+func TrackPacket(ifaceName string, data []byte, length int) {
 	if length < 14 {
 		return
 	}
 
 	// --- A. TAMAÑO ---
-	PacketSizes.Observe(float64(length))
+	PacketSizes.WithLabelValues(ifaceName).Observe(float64(length))
 
 	// --- B. TIPO DE CAST (Broadcast vs Multicast) ---
 	// BPF ya filtra Unicast, así que asumimos Multicast salvo que sea FF:FF...
@@ -106,8 +111,8 @@ func TrackPacket(data []byte, length int) {
 		}
 	}
 
-	RxPackets.WithLabelValues(sType, cast).Inc()
-	RxBytes.WithLabelValues(sType).Add(float64(length))
+	RxPackets.WithLabelValues(ifaceName, sType, cast).Inc()
+	RxBytes.WithLabelValues(ifaceName, sType).Add(float64(length))
 
 	// --- D. DETALLE ARP ---
 	// Si es ARP, miramos si es Request (1) o Reply (2).
@@ -116,11 +121,11 @@ func TrackPacket(data []byte, length int) {
 		opCode := binary.BigEndian.Uint16(data[20:22])
 		switch opCode {
 		case 1:
-			ArpOps.WithLabelValues("request").Inc()
+			ArpOps.WithLabelValues(ifaceName, "request").Inc()
 		case 2:
-			ArpOps.WithLabelValues("reply").Inc()
+			ArpOps.WithLabelValues(ifaceName, "reply").Inc()
 		default:
-			ArpOps.WithLabelValues("other").Inc()
+			ArpOps.WithLabelValues(ifaceName, "other").Inc()
 		}
 	}
 }

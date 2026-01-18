@@ -21,9 +21,10 @@ const (
 )
 
 type Notifier struct {
-	cfg       *config.AlertsConfig
-	alertChan chan string
-	client    *http.Client
+	cfg        *config.AlertsConfig
+	sensorName string // <--- NUEVO
+	alertChan  chan string
+	client     *http.Client
 
 	mu            sync.Mutex
 	alertCount    int
@@ -33,10 +34,12 @@ type Notifier struct {
 	droppedAlerts int
 }
 
-func NewNotifier(cfg *config.AlertsConfig) *Notifier {
+// NewNotifier acepta ahora 'sensorName' como argumento
+func NewNotifier(cfg *config.AlertsConfig, sensorName string) *Notifier {
 	n := &Notifier{
-		cfg:       cfg,
-		alertChan: make(chan string, alertBufferSize),
+		cfg:        cfg,
+		sensorName: sensorName,
+		alertChan:  make(chan string, alertBufferSize),
 		client: &http.Client{
 			Timeout: 5 * time.Second,
 		},
@@ -47,6 +50,11 @@ func NewNotifier(cfg *config.AlertsConfig) *Notifier {
 }
 
 func (n *Notifier) Alert(msg string) {
+	// Precepto #8: String Concatenation.
+	// Formateamos el mensaje con la etiqueta del sensor al principio.
+	// Ej: "[Switch-Planta-1] 🚨 LOOP DETECTED"
+	taggedMsg := fmt.Sprintf("[%s] %s", n.sensorName, msg)
+
 	n.mu.Lock()
 	now := time.Now()
 
@@ -63,8 +71,9 @@ func (n *Notifier) Alert(msg string) {
 		n.alertCount = 0
 		n.mu.Unlock()
 
-		n.dispatch(summary)
-		n.dispatch(msg)
+		// Enviamos el resumen también etiquetado (recursión segura porque despachamos directo a internal)
+		n.dispatch(fmt.Sprintf("[%s] %s", n.sensorName, summary))
+		n.dispatch(taggedMsg)
 		return
 	}
 
@@ -78,14 +87,14 @@ func (n *Notifier) Alert(msg string) {
 	if n.alertCount > GlobalAlertLimit {
 		n.isMuted = true
 		n.mutedUntil = now.Add(MuteDuration)
-		warning := fmt.Sprintf("⛔ [System] FLOOD PROTECTION. Silencing for 60s...")
+		warning := fmt.Sprintf("[%s] ⛔ [System] FLOOD PROTECTION. Silencing for 60s...", n.sensorName)
 		n.mu.Unlock()
 		n.dispatch(warning)
 		return
 	}
 	n.mu.Unlock()
 
-	n.dispatch(msg)
+	n.dispatch(taggedMsg)
 }
 
 func (n *Notifier) dispatch(msg string) {
