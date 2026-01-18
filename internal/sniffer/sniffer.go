@@ -17,7 +17,8 @@ import (
 	"github.com/soyunomas/loopwarden/internal/telemetry"
 )
 
-// Run ahora recibe 'ctx context.Context' en lugar de channel
+// Run inicia la captura de paquetes.
+// OPTIMIZACIÓN: Implementa "Socket Breaker" para shutdown inmediato.
 func Run(ctx context.Context, ifaceName string, cfg *config.Config, engine *detector.Engine) error {
 	
 	ifi, err := net.InterfaceByName(ifaceName)
@@ -29,6 +30,9 @@ func Run(ctx context.Context, ifaceName string, cfg *config.Config, engine *dete
 	if err != nil {
 		return fmt.Errorf("[%s] failed to open raw socket: %w", ifaceName, err)
 	}
+	// Nota: No usamos defer conn.Close() aquí de forma simple, 
+	// porque lo cerraremos explícitamente en el Breaker para desbloquear el Read.
+	// Sin embargo, Go permite Close() múltiples veces sin pánico, así que lo mantenemos por seguridad.
 	defer conn.Close()
 
 	engine.StartAll(conn, ifi)
@@ -54,7 +58,7 @@ func Run(ctx context.Context, ifaceName string, cfg *config.Config, engine *dete
 
 	log.Printf("🛡️  Sniffer active on %s [BPF Active]", ifaceName)
 
-	// --- Monitor de Drops ---
+	// --- 1. MONITOR DE DROPS ---
 	go func() {
 		ticker := time.NewTicker(5 * time.Second)
 		defer ticker.Stop()
@@ -69,10 +73,7 @@ func Run(ctx context.Context, ifaceName string, cfg *config.Config, engine *dete
 				if err == nil {
 					if stats.Drops > lastDrops {
 						delta := stats.Drops - lastDrops
-						
-						// UPDATED: Added ifaceName label
 						telemetry.SocketDrops.WithLabelValues(ifaceName).Add(float64(delta))
-						
 						if delta > 100 {
 							log.Printf("⚠️ [%s] KERNEL DROPS: %d packets lost", ifaceName, delta)
 						}
@@ -83,33 +84,50 @@ func Run(ctx context.Context, ifaceName string, cfg *config.Config, engine *dete
 		}
 	}()
 
-	// 6. Loop de Lectura
+	// --- 2. SHUTDOWN BREAKER (LA SOLUCIÓN AL HANG) ---
+	// Esta goroutine espera la señal de cancelación y mata el socket.
+	// Esto hace que ReadFrom desbloquee inmediatamente con error.
+	go func() {
+		<-ctx.Done()
+		conn.Close() // <--- CRÍTICO: Fuerza el error en ReadFrom
+	}()
+
+	// --- 3. LOOP DE LECTURA (HOT PATH) ---
 	buf := make([]byte, cfg.Network.SnapLen)
 
 	for {
-		select {
-		case <-ctx.Done():
-			return nil
-		default:
-		}
-		
+		// Ya no necesitamos select case <-ctx.Done() aquí al principio
+		// porque el error de ReadFrom manejará la salida.
+
+		// Mantenemos el Deadline para evitar zombies si el breaker fallara (defensa en profundidad)
 		conn.SetReadDeadline(time.Now().Add(1 * time.Second))
 		
 		n, _, err := conn.ReadFrom(buf)
 		if err != nil {
-			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
-				continue
-			}
+			// Comprobamos si el error es porque cerramos el socket (shutdown limpio)
+			// Go suele devolver "use of closed network connection" o "file already closed"
 			if strings.Contains(err.Error(), "closed") {
-				return nil
+				return nil // Salida limpia inmediata
 			}
+
+			// Si es timeout, solo volvemos a intentar (el contexto se chequeará implicitamente al intentar leer de nuevo si está cerrado)
+			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+				// Verificamos contexto por si acaso fue un timeout natural justo durante el shutdown
+				select {
+				case <-ctx.Done():
+					return nil
+				default:
+					continue
+				}
+			}
+
 			log.Printf("⚠️ [%s] Read error: %v", ifaceName, err)
 			continue
 		}
 
+		// --- PROCESAMIENTO (Sin cambios) ---
 		start := time.Now()
 
-		// UPDATED: Pass ifaceName to TrackPacket
 		telemetry.TrackPacket(ifaceName, buf[:n], n)
 
 		var vlanID uint16 = 0
@@ -123,7 +141,6 @@ func Run(ctx context.Context, ifaceName string, cfg *config.Config, engine *dete
 		engine.DispatchPacket(buf[:n], n, vlanID)
 
 		duration := time.Since(start).Nanoseconds()
-		// UPDATED: Added ifaceName label to Histogram
 		telemetry.ProcessingTime.WithLabelValues(ifaceName).Observe(float64(duration))
 	}
 }
