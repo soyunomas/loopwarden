@@ -20,8 +20,9 @@ const (
 )
 
 type MacStorm struct {
-	cfg    *config.MacStormConfig
-	notify *notifier.Notifier
+	cfg       *config.MacStormConfig
+	notify    *notifier.Notifier
+	ifaceName string // Identidad de la interfaz
 
 	// Configuración Efectiva (Local Copy para Hot Path)
 	limitPPS uint64
@@ -31,10 +32,11 @@ type MacStorm struct {
 	alertState map[[6]byte]time.Time
 }
 
-func NewMacStorm(cfg *config.MacStormConfig, n *notifier.Notifier) *MacStorm {
+func NewMacStorm(cfg *config.MacStormConfig, n *notifier.Notifier, ifaceName string) *MacStorm {
 	return &MacStorm{
 		cfg:        cfg,
 		notify:     n,
+		ifaceName:  ifaceName,
 		counters:   make(map[[6]byte]uint64, 1000),
 		alertState: make(map[[6]byte]time.Time),
 	}
@@ -111,7 +113,8 @@ func (ms *MacStorm) OnPacket(data []byte, length int, vlanID uint16) {
 		if !hasAlerted || time.Since(lastAlert) > MacAlertCooldown {
 
 			// TELEMETRY HIT
-			telemetry.EngineHits.WithLabelValues("MacStorm", "HostFlood").Inc()
+			// UPDATED: Added ms.ifaceName label
+			telemetry.EngineHits.WithLabelValues(ms.ifaceName, "MacStorm", "HostFlood").Inc()
 
 			ms.alertState[srcMac] = time.Now()
 			ms.mu.Unlock()

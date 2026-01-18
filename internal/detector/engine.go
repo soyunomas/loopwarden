@@ -23,7 +23,7 @@ type Engine struct {
 	ifaceName  string // Identidad del Engine
 }
 
-// NewEngine AHORA RECIBE ifaceName para propagarlo
+// NewEngine propaga ifaceName a todos los constructores
 func NewEngine(cfg *config.AlgorithmConfig, notify *notifier.Notifier, ifaceName string) *Engine {
 	e := &Engine{
 		cfg:        cfg,
@@ -33,48 +33,47 @@ func NewEngine(cfg *config.AlgorithmConfig, notify *notifier.Notifier, ifaceName
 
 	// 1. EtherFuse
 	if cfg.EtherFuse.Enabled {
-		e.algorithms = append(e.algorithms, NewEtherFuse(&cfg.EtherFuse, notify))
+		e.algorithms = append(e.algorithms, NewEtherFuse(&cfg.EtherFuse, notify, ifaceName))
 	}
 
-	// 2. ActiveProbe (NECESITA ifaceName)
+	// 2. ActiveProbe
 	if cfg.ActiveProbe.Enabled {
-		// Pasamos el ifaceName aquí
 		e.algorithms = append(e.algorithms, NewActiveProbe(&cfg.ActiveProbe, notify, ifaceName))
 	}
 
 	// 3. MacStorm
 	if cfg.MacStorm.Enabled {
-		e.algorithms = append(e.algorithms, NewMacStorm(&cfg.MacStorm, notify))
+		e.algorithms = append(e.algorithms, NewMacStorm(&cfg.MacStorm, notify, ifaceName))
 	}
 
 	// 4. FlapGuard
 	if cfg.FlapGuard.Enabled {
-		e.algorithms = append(e.algorithms, NewFlapGuard(&cfg.FlapGuard, notify))
+		e.algorithms = append(e.algorithms, NewFlapGuard(&cfg.FlapGuard, notify, ifaceName))
 	}
 
 	// 5. ArpWatchdog
 	if cfg.ArpWatch.Enabled {
-		e.algorithms = append(e.algorithms, NewArpWatchdog(&cfg.ArpWatch, notify))
+		e.algorithms = append(e.algorithms, NewArpWatchdog(&cfg.ArpWatch, notify, ifaceName))
 	}
 
 	// 6. DhcpHunter
 	if cfg.DhcpHunter.Enabled {
-		e.algorithms = append(e.algorithms, NewDhcpHunter(&cfg.DhcpHunter, notify))
+		e.algorithms = append(e.algorithms, NewDhcpHunter(&cfg.DhcpHunter, notify, ifaceName))
 	}
 
 	// 7. FlowPanic
 	if cfg.FlowPanic.Enabled {
-		e.algorithms = append(e.algorithms, NewFlowPanic(&cfg.FlowPanic, notify))
+		e.algorithms = append(e.algorithms, NewFlowPanic(&cfg.FlowPanic, notify, ifaceName))
 	}
 
 	// 8. RaGuard
 	if cfg.RaGuard.Enabled {
-		e.algorithms = append(e.algorithms, NewRaGuard(&cfg.RaGuard, notify))
+		e.algorithms = append(e.algorithms, NewRaGuard(&cfg.RaGuard, notify, ifaceName))
 	}
 
 	// 9. McastPolicer
 	if cfg.McastPolicer.Enabled {
-		e.algorithms = append(e.algorithms, NewMcastPolicer(&cfg.McastPolicer, notify))
+		e.algorithms = append(e.algorithms, NewMcastPolicer(&cfg.McastPolicer, notify, ifaceName))
 	}
 
 	log.Printf("✅ [Engine:%s] Initialized with %d algorithms", ifaceName, len(e.algorithms))

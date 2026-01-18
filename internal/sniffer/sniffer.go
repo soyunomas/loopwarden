@@ -62,14 +62,17 @@ func Run(ctx context.Context, ifaceName string, cfg *config.Config, engine *dete
 
 		for {
 			select {
-			case <-ctx.Done(): // <--- CAMBIO: Escuchamos contexto
+			case <-ctx.Done():
 				return
 			case <-ticker.C:
 				stats, err := conn.Stats()
 				if err == nil {
 					if stats.Drops > lastDrops {
 						delta := stats.Drops - lastDrops
-						telemetry.SocketDrops.Add(float64(delta))
+						
+						// UPDATED: Added ifaceName label
+						telemetry.SocketDrops.WithLabelValues(ifaceName).Add(float64(delta))
+						
 						if delta > 100 {
 							log.Printf("⚠️ [%s] KERNEL DROPS: %d packets lost", ifaceName, delta)
 						}
@@ -84,9 +87,8 @@ func Run(ctx context.Context, ifaceName string, cfg *config.Config, engine *dete
 	buf := make([]byte, cfg.Network.SnapLen)
 
 	for {
-		// Verificamos si nos mandaron parar ANTES de leer
 		select {
-		case <-ctx.Done(): // <--- CAMBIO: Escuchamos contexto
+		case <-ctx.Done():
 			return nil
 		default:
 		}
@@ -95,7 +97,6 @@ func Run(ctx context.Context, ifaceName string, cfg *config.Config, engine *dete
 		
 		n, _, err := conn.ReadFrom(buf)
 		if err != nil {
-			// Si es timeout, volvemos al inicio del loop (donde se chequea ctx.Done)
 			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
 				continue
 			}
@@ -108,7 +109,8 @@ func Run(ctx context.Context, ifaceName string, cfg *config.Config, engine *dete
 
 		start := time.Now()
 
-		telemetry.TrackPacket(buf[:n], n)
+		// UPDATED: Pass ifaceName to TrackPacket
+		telemetry.TrackPacket(ifaceName, buf[:n], n)
 
 		var vlanID uint16 = 0
 		if n >= 18 {
@@ -121,6 +123,7 @@ func Run(ctx context.Context, ifaceName string, cfg *config.Config, engine *dete
 		engine.DispatchPacket(buf[:n], n, vlanID)
 
 		duration := time.Since(start).Nanoseconds()
-		telemetry.ProcessingTime.Observe(float64(duration))
+		// UPDATED: Added ifaceName label to Histogram
+		telemetry.ProcessingTime.WithLabelValues(ifaceName).Observe(float64(duration))
 	}
 }

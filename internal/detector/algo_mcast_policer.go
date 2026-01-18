@@ -14,9 +14,10 @@ import (
 )
 
 type McastPolicer struct {
-	cfg    *config.McastPolicerConfig
-	notify *notifier.Notifier
-	mu     sync.Mutex
+	cfg       *config.McastPolicerConfig
+	notify    *notifier.Notifier
+	ifaceName string // Identidad de la interfaz
+	mu        sync.Mutex
 	
 	// Configuración Efectiva
 	maxPPS uint64
@@ -26,10 +27,11 @@ type McastPolicer struct {
 	lastAlert   time.Time
 }
 
-func NewMcastPolicer(cfg *config.McastPolicerConfig, n *notifier.Notifier) *McastPolicer {
+func NewMcastPolicer(cfg *config.McastPolicerConfig, n *notifier.Notifier, ifaceName string) *McastPolicer {
 	return &McastPolicer{
 		cfg:       cfg,
 		notify:    n,
+		ifaceName: ifaceName,
 		lastReset: time.Now(),
 	}
 }
@@ -73,7 +75,8 @@ func (mp *McastPolicer) OnPacket(data []byte, length int, vlanID uint16) {
 			if mp.packetCount > mp.maxPPS {
 				if now.Sub(mp.lastAlert) > 10*time.Second {
 					
-					telemetry.EngineHits.WithLabelValues("McastPolicer", "MulticastStorm").Inc()
+					// UPDATED: Added mp.ifaceName label
+					telemetry.EngineHits.WithLabelValues(mp.ifaceName, "McastPolicer", "MulticastStorm").Inc()
 					
 					pps := mp.packetCount
 					go func(count uint64, vlan uint16, limit uint64) {

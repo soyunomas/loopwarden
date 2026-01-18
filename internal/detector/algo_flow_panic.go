@@ -21,9 +21,10 @@ const (
 )
 
 type FlowPanic struct {
-	cfg    *config.FlowPanicConfig
-	notify *notifier.Notifier
-	mu     sync.Mutex
+	cfg       *config.FlowPanicConfig
+	notify    *notifier.Notifier
+	ifaceName string // Identidad de la interfaz
+	mu        sync.Mutex
 
 	// Configuración Efectiva
 	maxPausePPS uint64
@@ -33,10 +34,11 @@ type FlowPanic struct {
 	lastAlert   time.Time
 }
 
-func NewFlowPanic(cfg *config.FlowPanicConfig, n *notifier.Notifier) *FlowPanic {
+func NewFlowPanic(cfg *config.FlowPanicConfig, n *notifier.Notifier, ifaceName string) *FlowPanic {
 	return &FlowPanic{
 		cfg:       cfg,
 		notify:    n,
+		ifaceName: ifaceName,
 		lastReset: time.Now(),
 	}
 }
@@ -84,7 +86,8 @@ func (fp *FlowPanic) OnPacket(data []byte, length int, vlanID uint16) {
 				if fp.packetCount > fp.maxPausePPS {
 					if now.Sub(fp.lastAlert) > PauseAlertCooldown {
 						
-						telemetry.EngineHits.WithLabelValues("FlowPanic", "PauseFlood").Inc()
+						// UPDATED: Added fp.ifaceName label
+						telemetry.EngineHits.WithLabelValues(fp.ifaceName, "FlowPanic", "PauseFlood").Inc()
 
 						count := fp.packetCount
 						srcMac := net.HardwareAddr(data[6:12]).String()

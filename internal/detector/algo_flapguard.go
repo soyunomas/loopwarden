@@ -28,8 +28,9 @@ type flapEntry struct {
 }
 
 type FlapGuard struct {
-	cfg    *config.FlapGuardConfig
-	notify *notifier.Notifier
+	cfg       *config.FlapGuardConfig
+	notify    *notifier.Notifier
+	ifaceName string // Identidad de la interfaz
 	
 	// Configuración Efectiva
 	threshold uint16
@@ -38,11 +39,12 @@ type FlapGuard struct {
 	registry map[[6]byte]flapEntry
 }
 
-func NewFlapGuard(cfg *config.FlapGuardConfig, n *notifier.Notifier) *FlapGuard {
+func NewFlapGuard(cfg *config.FlapGuardConfig, n *notifier.Notifier, ifaceName string) *FlapGuard {
 	return &FlapGuard{
-		cfg:      cfg,
-		notify:   n,
-		registry: make(map[[6]byte]flapEntry, 1000),
+		cfg:       cfg,
+		notify:    n,
+		ifaceName: ifaceName,
+		registry:  make(map[[6]byte]flapEntry, 1000),
 	}
 }
 
@@ -127,7 +129,8 @@ func (fg *FlapGuard) OnPacket(data []byte, length int, vlanID uint16) {
 				entry.lastAlert = now
 
 				// TELEMETRY HIT
-				telemetry.EngineHits.WithLabelValues("FlapGuard", "MacFlapping").Inc()
+				// UPDATED: Added fg.ifaceName label
+				telemetry.EngineHits.WithLabelValues(fg.ifaceName, "FlapGuard", "MacFlapping").Inc()
 
 				fg.registry[srcMac] = entry
 				fg.mu.Unlock()

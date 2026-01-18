@@ -59,9 +59,6 @@ func (ap *ActiveProbe) Start(conn *packet.Conn, iface *net.Interface) error {
 			ap.intervalMs = override.IntervalMs
 			log.Printf("🔧 [ActiveProbe] Override applied for %s: Interval = %dms", iface.Name, ap.intervalMs)
 		}
-		// Ethertype es raro sobrescribirlo, pero el struct lo permite, así que lo respetamos
-		// Nota: ActiveProbeOverride no tenía Ethertype en config.go, pero si lo tuviera, aquí iría.
-		// Asumiendo que config.go en ActiveProbeOverride solo tiene IntervalMs según tu ejemplo anterior.
 	}
 
 	broadcastHW := net.HardwareAddr{0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF}
@@ -157,7 +154,8 @@ func (ap *ActiveProbe) OnPacket(data []byte, length int, vlanID uint16) {
 							ap.ifaceName, remoteIface, ap.ifaceName)
 					}
 
-					telemetry.EngineHits.WithLabelValues("ActiveProbe", alertType).Inc()
+					// UPDATED: Added ap.ifaceName label
+					telemetry.EngineHits.WithLabelValues(ap.ifaceName, "ActiveProbe", alertType).Inc()
 					
 					dstMac := data[0:6]
 					retInfo := utils.ClassifyMAC(dstMac)

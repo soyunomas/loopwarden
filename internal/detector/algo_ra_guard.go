@@ -25,15 +25,17 @@ const (
 type RaGuard struct {
 	cfg         *config.RaGuardConfig
 	notify      *notifier.Notifier
+	ifaceName   string // Identidad de la interfaz
 	trustedMacs map[string]bool
 	mu          sync.Mutex
 	lastAlert   time.Time
 }
 
-func NewRaGuard(cfg *config.RaGuardConfig, n *notifier.Notifier) *RaGuard {
+func NewRaGuard(cfg *config.RaGuardConfig, n *notifier.Notifier, ifaceName string) *RaGuard {
 	return &RaGuard{
 		cfg:         cfg,
 		notify:      n,
+		ifaceName:   ifaceName,
 		trustedMacs: make(map[string]bool),
 	}
 }
@@ -90,9 +92,6 @@ func (r *RaGuard) OnPacket(data []byte, length int, vlanID uint16) {
 	// Next Header field is at offset 6 in IPv6 header
 	nextHeader := data[ethOffset+6]
 	
-	// Simplification: We check if NextHeader is ICMPv6 directly.
-	// NOTE: In real world IPv6, there could be extension headers chain (Hop-by-Hop, etc).
-	// But RA Guard usually assumes standard RAs for performance.
 	if nextHeader == ProtoICMPv6 {
 		icmpOffset := ethOffset + 40
 		if length < icmpOffset+1 { return }
@@ -108,8 +107,8 @@ func (r *RaGuard) OnPacket(data []byte, length int, vlanID uint16) {
 				now := time.Now()
 				if now.Sub(r.lastAlert) > RaAlertCooldown {
 					
-					// TELEMETRY HIT
-					telemetry.EngineHits.WithLabelValues("RaGuard", "RogueRA").Inc()
+					// UPDATED: Added r.ifaceName label
+					telemetry.EngineHits.WithLabelValues(r.ifaceName, "RaGuard", "RogueRA").Inc()
 
 					// Get Src IPv6 (Offset 8 in IPv6 header)
 					srcIP := net.IP(data[ethOffset+8 : ethOffset+24])

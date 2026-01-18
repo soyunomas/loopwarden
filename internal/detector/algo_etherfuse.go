@@ -20,9 +20,10 @@ const (
 )
 
 type EtherFuse struct {
-	cfg    *config.EtherFuseConfig
-	notify *notifier.Notifier
-	mu     sync.Mutex
+	cfg       *config.EtherFuseConfig
+	notify    *notifier.Notifier
+	ifaceName string // Identidad de la interfaz
+	mu        sync.Mutex
 
 	// Configuración Efectiva
 	alertThreshold int
@@ -37,11 +38,12 @@ type EtherFuse struct {
 	lastAlertTime time.Time
 }
 
-func NewEtherFuse(cfg *config.EtherFuseConfig, n *notifier.Notifier) *EtherFuse {
+func NewEtherFuse(cfg *config.EtherFuseConfig, n *notifier.Notifier, ifaceName string) *EtherFuse {
 	return &EtherFuse{
 		cfg:         cfg,
 		notify:      n,
-		// HistorySize es estático (memory alloc), no overridable por ahora
+		ifaceName:   ifaceName,
+		// HistorySize es estático
 		ringBuffer:  make([]uint64, cfg.HistorySize),
 		lookupTable: make(map[uint64]uint8, cfg.HistorySize),
 		writeCursor: 0,
@@ -93,7 +95,8 @@ func (ef *EtherFuse) OnPacket(data []byte, length int, vlanID uint16) {
 			// USAR VARIABLE LOCAL stormPPSLimit
 			if ef.packetsSec > ef.stormPPSLimit {
 				if now.Sub(ef.lastAlertTime) > 5*time.Second {
-					telemetry.EngineHits.WithLabelValues("EtherFuse", "GlobalStorm").Inc()
+					// UPDATED: Added ef.ifaceName label
+					telemetry.EngineHits.WithLabelValues(ef.ifaceName, "EtherFuse", "GlobalStorm").Inc()
 					
 					loc := "Native"
 					if vlanID != 0 { loc = fmt.Sprintf("%d", vlanID) }
@@ -116,11 +119,11 @@ func (ef *EtherFuse) OnPacket(data []byte, length int, vlanID uint16) {
 		newCount := count + 1
 		ef.lookupTable[sum] = newCount
 
-		// USAR VARIABLE LOCAL alertThreshold
 		if int(newCount) > ef.alertThreshold {
 			if time.Since(ef.lastAlertTime) > 5*time.Second {
 				
-				telemetry.EngineHits.WithLabelValues("EtherFuse", "LoopDetected").Inc()
+				// UPDATED: Added ef.ifaceName label
+				telemetry.EngineHits.WithLabelValues(ef.ifaceName, "EtherFuse", "LoopDetected").Inc()
 
 				var dstMacBytes, srcMacBytes []byte
 				if length >= 12 {

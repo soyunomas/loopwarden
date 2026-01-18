@@ -26,6 +26,7 @@ const (
 type DhcpHunter struct {
 	cfg         *config.DhcpHunterConfig
 	notify      *notifier.Notifier
+	ifaceName   string // Identidad de la interfaz
 	
 	trustedMacs map[string]bool
 	trustedNets []*net.IPNet
@@ -34,10 +35,11 @@ type DhcpHunter struct {
 	lastAlert time.Time
 }
 
-func NewDhcpHunter(cfg *config.DhcpHunterConfig, n *notifier.Notifier) *DhcpHunter {
+func NewDhcpHunter(cfg *config.DhcpHunterConfig, n *notifier.Notifier, ifaceName string) *DhcpHunter {
 	return &DhcpHunter{
 		cfg:         cfg,
 		notify:      n,
+		ifaceName:   ifaceName,
 		trustedMacs: make(map[string]bool),
 		trustedNets: make([]*net.IPNet, 0),
 	}
@@ -47,13 +49,10 @@ func (d *DhcpHunter) Name() string { return "DhcpHunter" }
 
 func (d *DhcpHunter) Start(conn *packet.Conn, iface *net.Interface) error {
 	// 1. Construir lista maestra de MACs (Global + Override)
-	// Usamos slice intermedio para mantener el orden y claridad
 	var rawMacs []string
 	
-	// A. Añadir Globales
 	rawMacs = append(rawMacs, d.cfg.TrustedMacs...)
 	
-	// B. Añadir Overrides (Si existen para esta interfaz)
 	if override, ok := d.cfg.Overrides[iface.Name]; ok {
 		log.Printf("🔧 [DhcpHunter] Applying overrides for interface %s (Extra MACs: %d, Extra CIDRs: %d)", 
 			iface.Name, len(override.TrustedMacs), len(override.TrustedCidrs))
@@ -62,9 +61,7 @@ func (d *DhcpHunter) Start(conn *packet.Conn, iface *net.Interface) error {
 
 	// 2. Procesar y Normalizar MACs
 	for _, m := range rawMacs {
-		// Limpieza de inputs: Trim espacios y LowerCase
 		cleanM := strings.ToLower(strings.TrimSpace(m))
-		
 		mac, err := net.ParseMAC(cleanM)
 		if err == nil {
 			d.trustedMacs[mac.String()] = true
@@ -73,7 +70,7 @@ func (d *DhcpHunter) Start(conn *packet.Conn, iface *net.Interface) error {
 		}
 	}
 
-	// 3. Construir lista maestra de CIDRs (Global + Override)
+	// 3. Construir lista maestra de CIDRs
 	var rawCidrs []string
 	rawCidrs = append(rawCidrs, d.cfg.TrustedCidrs...)
 	
@@ -99,7 +96,6 @@ func (d *DhcpHunter) Start(conn *packet.Conn, iface *net.Interface) error {
 }
 
 func (d *DhcpHunter) OnPacket(data []byte, length int, vlanID uint16) {
-	// Offset calculation based on VLAN tag presence
 	ethOffset := 14
 	ethTypeOffset := 12
 	if vlanID != 0 {
@@ -107,65 +103,50 @@ func (d *DhcpHunter) OnPacket(data []byte, length int, vlanID uint16) {
 		ethTypeOffset = 16
 	}
 
-	// Bounds Check #1: Ethernet Header
 	if length < ethOffset {
 		return
 	}
 
-	// 1. Check EtherType (Must be IPv4)
 	ethType := binary.BigEndian.Uint16(data[ethTypeOffset : ethTypeOffset+2])
 	if ethType != EtherTypeIPv4 {
 		return
 	}
 
-	// Bounds Check #2: IPv4 Min Header (20 bytes)
 	if length < ethOffset+20 {
 		return
 	}
 
-	// 2. Parse IPv4 Header
-	// IHL is lower 4 bits of first byte. Unit is 32-bit words (4 bytes).
 	ihl := int(data[ethOffset]&0x0F) * 4
 	if ihl < 20 {
-		return // Invalid IP header
+		return
 	}
 
-	// Protocol is at offset 9 in IPv4 header
 	protocol := data[ethOffset+9]
 	if protocol != IPProtoUDP {
 		return
 	}
 
-	// Extract Src IP (Offset 12 in IPv4)
 	srcIP := net.IP(data[ethOffset+12 : ethOffset+16])
 
-	// 3. Parse UDP Header
 	udpStart := ethOffset + ihl
 	if length < udpStart+8 {
 		return
 	}
 
-	// Ports
 	srcPort := binary.BigEndian.Uint16(data[udpStart : udpStart+2])
 	dstPort := binary.BigEndian.Uint16(data[udpStart+2 : udpStart+4])
 
-	// DHCP Server (67) sending to Client (68)
 	if srcPort == DhcpServerPort && dstPort == DhcpClientPort {
 		
-		// 4. Security Check
 		srcMacSlice := data[6:12]
-		// Normalización en Hot Path: net.HardwareAddr.String() devuelve lower-case por defecto.
 		srcMacStr := net.HardwareAddr(srcMacSlice).String()
 		
 		isTrusted := false
 
-		// Check 1: Trusted MAC (Map Lookup O(1))
 		if d.trustedMacs[srcMacStr] {
 			isTrusted = true
 		}
 
-		// Check 2: Trusted CIDR (Linear Scan)
-		// Solo si no pasó por MAC, para ahorrar CPU.
 		if !isTrusted {
 			for _, net := range d.trustedNets {
 				if net.Contains(srcIP) {
@@ -180,10 +161,9 @@ func (d *DhcpHunter) OnPacket(data []byte, length int, vlanID uint16) {
 			now := time.Now()
 			if now.Sub(d.lastAlert) > DhcpCooldown {
 				
-				// TELEMETRY HIT
-				telemetry.EngineHits.WithLabelValues("DhcpHunter", "RogueServer").Inc()
+				// UPDATED: Added d.ifaceName label
+				telemetry.EngineHits.WithLabelValues(d.ifaceName, "DhcpHunter", "RogueServer").Inc()
 				
-				// Copy data for goroutine
 				capturedSrcIP := srcIP.String()
 				capturedSrcMAC := srcMacStr
 				

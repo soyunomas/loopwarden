@@ -32,23 +32,25 @@ type arpStats struct {
 }
 
 type ArpWatchdog struct {
-	cfg    *config.ArpWatchConfig
-	notify *notifier.Notifier
-	mu     sync.Mutex
+	cfg       *config.ArpWatchConfig
+	notify    *notifier.Notifier
+	ifaceName string // Identidad de la interfaz
+	mu        sync.Mutex
 
 	// Configuración Efectiva
 	limitPPS uint64
 
-	sources       map[string]*arpStats
-	alertRegistry map[string]time.Time
+	sources       map[[6]byte]*arpStats
+	alertRegistry map[[6]byte]time.Time
 }
 
-func NewArpWatchdog(cfg *config.ArpWatchConfig, n *notifier.Notifier) *ArpWatchdog {
+func NewArpWatchdog(cfg *config.ArpWatchConfig, n *notifier.Notifier, ifaceName string) *ArpWatchdog {
 	return &ArpWatchdog{
 		cfg:           cfg,
 		notify:        n,
-		sources:       make(map[string]*arpStats, 100),
-		alertRegistry: make(map[string]time.Time),
+		ifaceName:     ifaceName,
+		sources:       make(map[[6]byte]*arpStats, 100),
+		alertRegistry: make(map[[6]byte]time.Time),
 	}
 }
 
@@ -115,10 +117,12 @@ func (aw *ArpWatchdog) OnPacket(data []byte, length int, vlanID uint16) {
 		return
 	}
 
-	srcMac := data[arpBase+8 : arpBase+14]
+	// ZERO-ALLOC KEY EXTRACTION
+	var srcMacKey [6]byte
+	copy(srcMacKey[:], data[arpBase+8:arpBase+14])
+	
 	targetIPBytes := data[arpBase+24 : arpBase+28]
 	targetIP := ipToUint32(targetIPBytes)
-	srcMacKey := string(srcMac)
 
 	aw.mu.Lock()
 	stats, exists := aw.sources[srcMacKey]
@@ -154,20 +158,18 @@ func (aw *ArpWatchdog) analyzeAndReset() {
 	aw.mu.Lock()
 	defer aw.mu.Unlock()
 
-	for macStr, stats := range aw.sources {
+	for macArray, stats := range aw.sources {
 		uniqueTargets := len(stats.targets)
 		isScanning := uniqueTargets > ScanThresholdIPs
 
-		// USAMOS LA VARIABLE LOCAL aw.limitPPS
 		threshold := aw.limitPPS
 		
-		// Lógica interna para escaneos (Hardcoded safety net)
 		if isScanning {
 			threshold = MinScanPPS
 		}
 
 		if stats.pps > threshold {
-			lastAlert, alerted := aw.alertRegistry[macStr]
+			lastAlert, alerted := aw.alertRegistry[macArray]
 			if !alerted || time.Since(lastAlert) > ArpAlertCooldown {
 				var pattern, details, metricType string
 
@@ -188,10 +190,11 @@ func (aw *ArpWatchdog) analyzeAndReset() {
 					details = fmt.Sprintf("Multiple Targets (%d IPs)", uniqueTargets)
 				}
 
-				telemetry.EngineHits.WithLabelValues("ArpWatchdog", metricType).Inc()
+				// UPDATED: Added aw.ifaceName label
+				telemetry.EngineHits.WithLabelValues(aw.ifaceName, "ArpWatchdog", metricType).Inc()
 
 				capturedPPS := stats.pps
-				capturedMAC := net.HardwareAddr(macStr).String()
+				capturedMAC := net.HardwareAddr(macArray[:]).String()
 
 				go func(m, p, d string, rate uint64, lim uint64) {
 					msg := fmt.Sprintf("[ArpWatchdog] 🐶 DISCOVERY STORM DETECTED!\n"+
@@ -203,7 +206,7 @@ func (aw *ArpWatchdog) analyzeAndReset() {
 					aw.notify.Alert(msg)
 				}(capturedMAC, pattern, details, capturedPPS, threshold)
 
-				aw.alertRegistry[macStr] = time.Now()
+				aw.alertRegistry[macArray] = time.Now()
 			}
 		}
 
@@ -215,5 +218,5 @@ func (aw *ArpWatchdog) analyzeAndReset() {
 			}
 		}
 	}
-	aw.sources = make(map[string]*arpStats, 100)
+	aw.sources = make(map[[6]byte]*arpStats, 100)
 }
