@@ -24,10 +24,8 @@ type TelemetryConfig struct {
 	ListenAddress string `toml:"listen_address"`
 }
 
-// --- NETWORK CONFIG (MODIFICADO) ---
 type NetworkConfig struct {
-	// Ahora soporta múltiples interfaces: ["eno1", "eno2", "vlan100"]
-	Interfaces []string `toml:"interfaces"` 
+	Interfaces []string `toml:"interfaces"`
 	SnapLen    int      `toml:"snaplen"`
 }
 
@@ -43,51 +41,119 @@ type AlgorithmConfig struct {
 	McastPolicer McastPolicerConfig `toml:"mcast_policer"`
 }
 
-// ... (Resto de structs de configuración iguales que antes) ...
-// Para ahorrar espacio, asumo que los structs hijos (EtherFuseConfig, etc.) siguen ahí.
+// --- ALGORITMOS CON OVERRIDES ---
 
 type EtherFuseConfig struct {
 	Enabled        bool   `toml:"enabled"`
 	HistorySize    int    `toml:"history_size"`
 	AlertThreshold int    `toml:"alert_threshold"`
 	StormPPSLimit  uint64 `toml:"storm_pps_limit"`
+
+	// Mapa: "interface_name" -> Config específica
+	Overrides map[string]EtherFuseOverride `toml:"overrides"`
 }
+
+type EtherFuseOverride struct {
+	AlertThreshold int    `toml:"alert_threshold"`
+	StormPPSLimit  uint64 `toml:"storm_pps_limit"`
+	// HistorySize no se permite en override porque afecta la alocación de memoria inicial
+}
+
 type ActiveProbeConfig struct {
 	Enabled      bool   `toml:"enabled"`
 	IntervalMs   int    `toml:"interval_ms"`
 	Ethertype    uint16 `toml:"ethertype"`
 	MagicPayload string `toml:"magic_payload"`
 	TargetMAC    string `toml:"target_mac"`
+
+	Overrides map[string]ActiveProbeOverride `toml:"overrides"`
 }
+
+type ActiveProbeOverride struct {
+	IntervalMs int `toml:"interval_ms"`
+	// Ethertype y Payload suelen ser globales para consistencia
+}
+
 type MacStormConfig struct {
 	Enabled      bool   `toml:"enabled"`
 	MaxPPSPerMac uint64 `toml:"max_pps_per_mac"`
+
+	Overrides map[string]MacStormOverride `toml:"overrides"`
 }
+
+type MacStormOverride struct {
+	MaxPPSPerMac uint64 `toml:"max_pps_per_mac"`
+}
+
 type FlapGuardConfig struct {
 	Enabled   bool `toml:"enabled"`
 	Threshold int  `toml:"threshold"`
+
+	Overrides map[string]FlapGuardOverride `toml:"overrides"`
 }
+
+type FlapGuardOverride struct {
+	Threshold int `toml:"threshold"`
+}
+
 type ArpWatchConfig struct {
 	Enabled bool   `toml:"enabled"`
 	MaxPPS  uint64 `toml:"max_pps"`
+
+	Overrides map[string]ArpWatchOverride `toml:"overrides"`
 }
+
+type ArpWatchOverride struct {
+	MaxPPS uint64 `toml:"max_pps"`
+}
+
 type DhcpHunterConfig struct {
 	Enabled      bool     `toml:"enabled"`
 	TrustedMacs  []string `toml:"trusted_macs"`
 	TrustedCidrs []string `toml:"trusted_cidrs"`
+
+	Overrides map[string]DhcpHunterOverride `toml:"overrides"`
 }
+
+type DhcpHunterOverride struct {
+	TrustedMacs  []string `toml:"trusted_macs"`
+	TrustedCidrs []string `toml:"trusted_cidrs"`
+}
+
 type FlowPanicConfig struct {
-	Enabled     bool `toml:"enabled"`
+	Enabled     bool   `toml:"enabled"`
+	MaxPausePPS uint64 `toml:"max_pause_pps"`
+
+	Overrides map[string]FlowPanicOverride `toml:"overrides"`
+}
+
+type FlowPanicOverride struct {
 	MaxPausePPS uint64 `toml:"max_pause_pps"`
 }
+
 type RaGuardConfig struct {
 	Enabled     bool     `toml:"enabled"`
 	TrustedMacs []string `toml:"trusted_macs"`
+
+	Overrides map[string]RaGuardOverride `toml:"overrides"`
 }
+
+type RaGuardOverride struct {
+	TrustedMacs []string `toml:"trusted_macs"`
+}
+
 type McastPolicerConfig struct {
 	Enabled bool   `toml:"enabled"`
 	MaxPPS  uint64 `toml:"max_pps"`
+
+	Overrides map[string]McastPolicerOverride `toml:"overrides"`
 }
+
+type McastPolicerOverride struct {
+	MaxPPS uint64 `toml:"max_pps"`
+}
+
+// --- ALERTAS ---
 
 type AlertsConfig struct {
 	SyslogServer string         `toml:"syslog_server"`
@@ -95,10 +161,12 @@ type AlertsConfig struct {
 	Smtp         SmtpConfig     `toml:"smtp"`
 	Telegram     TelegramConfig `toml:"telegram"`
 }
+
 type WebhookConfig struct {
 	Enabled bool   `toml:"enabled"`
 	URL     string `toml:"url"`
 }
+
 type SmtpConfig struct {
 	Enabled bool   `toml:"enabled"`
 	Host    string `toml:"host"`
@@ -108,6 +176,7 @@ type SmtpConfig struct {
 	To      string `toml:"to"`
 	From    string `toml:"from"`
 }
+
 type TelegramConfig struct {
 	Enabled bool   `toml:"enabled"`
 	Token   string `toml:"token"`

@@ -5,13 +5,14 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/mdlayher/packet"
 	"github.com/soyunomas/loopwarden/internal/config"
 	"github.com/soyunomas/loopwarden/internal/notifier"
-	"github.com/soyunomas/loopwarden/internal/telemetry" // IMPORTAR
+	"github.com/soyunomas/loopwarden/internal/telemetry"
 )
 
 const (
@@ -40,14 +41,31 @@ func NewRaGuard(cfg *config.RaGuardConfig, n *notifier.Notifier) *RaGuard {
 func (r *RaGuard) Name() string { return "RaGuard" }
 
 func (r *RaGuard) Start(conn *packet.Conn, iface *net.Interface) error {
-	for _, m := range r.cfg.TrustedMacs {
-		mac, err := net.ParseMAC(m)
+	// 1. Recopilación de MACs (Global + Override)
+	var rawMacs []string
+	
+	// A. Global
+	rawMacs = append(rawMacs, r.cfg.TrustedMacs...)
+	
+	// B. Override
+	if override, ok := r.cfg.Overrides[iface.Name]; ok {
+		log.Printf("🔧 [RaGuard] Applying overrides for interface %s (Extra MACs: %d)", 
+			iface.Name, len(override.TrustedMacs))
+		rawMacs = append(rawMacs, override.TrustedMacs...)
+	}
+
+	// 2. Normalización y llenado del Map
+	for _, m := range rawMacs {
+		cleanM := strings.ToLower(strings.TrimSpace(m))
+		mac, err := net.ParseMAC(cleanM)
 		if err == nil {
 			r.trustedMacs[mac.String()] = true
 		} else {
-			log.Printf("⚠️ [RaGuard] Invalid trusted MAC: %s", m)
+			log.Printf("⚠️ [RaGuard] Invalid trusted MAC ignored: '%s'", m)
 		}
 	}
+	
+	log.Printf("✅ [RaGuard:%s] Active. Trusted Routers: %d", iface.Name, len(r.trustedMacs))
 	return nil
 }
 
@@ -73,6 +91,8 @@ func (r *RaGuard) OnPacket(data []byte, length int, vlanID uint16) {
 	nextHeader := data[ethOffset+6]
 	
 	// Simplification: We check if NextHeader is ICMPv6 directly.
+	// NOTE: In real world IPv6, there could be extension headers chain (Hop-by-Hop, etc).
+	// But RA Guard usually assumes standard RAs for performance.
 	if nextHeader == ProtoICMPv6 {
 		icmpOffset := ethOffset + 40
 		if length < icmpOffset+1 { return }
@@ -81,7 +101,7 @@ func (r *RaGuard) OnPacket(data []byte, length int, vlanID uint16) {
 		
 		if icmpType == ICMPv6TypeRA {
 			srcMacSlice := data[6:12]
-			srcMacStr := net.HardwareAddr(srcMacSlice).String()
+			srcMacStr := net.HardwareAddr(srcMacSlice).String() // Returns lower-case
 
 			if !r.trustedMacs[srcMacStr] {
 				r.mu.Lock()

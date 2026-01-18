@@ -103,6 +103,16 @@ LoopWarden ejecuta **9 motores de detección concurrentes**. Cada uno busca una 
 *   **🎯 Qué detecta:**
     *   ✅ **Tormentas de Clonación:** Software como FOG/Clonezilla mal configurado.
     *   ✅ **Fugas de Vídeo:** Cámaras IP o IPTV inundando puertos de acceso.
+    
+### 10. Multi-Stack Granular Tuning 🎛️
+*Configuración jerárquica por interfaz.*
+
+*   **🔬 Mecánica:** LoopWarden permite definir una política global de seguridad y aplicar **excepciones específicas** (Overrides) por interfaz.
+*   **🛡️ Lógica:**
+    *   **Global:** Define reglas estrictas para toda la red (ej: "Nadie puede escanear IPs").
+    *   **Local:** Relaja o endurece las reglas para puertos específicos (ej: "La interfaz `vlan_guest` puede hacer más peticiones ARP, pero `mgmt` tiene tolerancia cero").
+*   **💡 Valor Diferencial:** Permite desplegar una sola instancia de LoopWarden para monitorizar entornos heterogéneos (Servidores, IoT, Usuarios, Wi-Fi) sin generar falsos positivos en las zonas ruidosas.
+
 ---
 
 ### 📊 Telemetría y Observabilidad (Prometheus)
@@ -129,15 +139,15 @@ En una tormenta de broadcast, una red puede generar millones de eventos por segu
 *   **Adaptive Hysteresis:** Cada algoritmo tiene memoria. Si *FlapGuard* detecta un host inestable, te avisa una vez y luego guarda silencio por 30 segundos sobre ese host específico, manteniendo tus canales de comunicación limpios.
 *   **Integraciones:** Webhooks JSON (Slack, Discord, Mattermost, Google Chat, Rocket.Chat), **Telegram Bots**, Syslog (RFC 3164) y SMTP (Email).
 
-## ⚙️ Referencia de Configuración (`config.toml`)
-
-A continuación se detallan todos los parámetros disponibles en el archivo de configuración.
-
-### 🔌 Red y Alertas
+---
 
 ## ⚙️ Referencia de Configuración (`config.toml`)
 
 A continuación se detallan todos los parámetros disponibles en el archivo de configuración.
+
+LoopWarden utiliza un sistema de **Herencia de Configuración** para gestionar múltiples interfaces:
+1.  **Valores Globales:** Se aplican por defecto a todas las interfaces.
+2.  **Overrides (Excepciones):** Definidos por interfaz dentro de cada algoritmo. Si existen, reemplazan al valor global (para números) o se suman a él (para listas).
 
 ### 🔌 Sistema y Red
 
@@ -164,30 +174,51 @@ A continuación se detallan todos los parámetros disponibles en el archivo de c
 
 ### 🧠 Algoritmos de Detección
 
-| Sección | Parámetro | Default | Descripción |
-| :--- | :--- | :--- | :--- |
-| **[algorithms.etherfuse]** | `enabled` | `true` | Activa/Desactiva el análisis de rebote de payloads. |
-| | `history_size` | `4096` | Tamaño del buffer de memoria para hashes. Más tamaño = mayor ventana de tiempo. |
-| | `alert_threshold` | `50` | Cantidad de veces que un paquete debe repetirse para considerar bucle. |
-| | `storm_pps_limit` | `5000` | Umbral de PPS global para considerar que la red está bajo tormenta masiva. |
-| **[algorithms.active_probe]**| `enabled` | `true` | Activa/Desactiva la inyección activa de sondas. |
-| | `interval_ms` | `1000` | Frecuencia de envío de la sonda (milisegundos). |
-| | `ethertype` | `65535` | Tipo de protocolo Ethernet (0xFFFF) usado para la sonda. |
-| **[algorithms.mac_storm]** | `enabled` | `true` | Activa/Desactiva el limitador de velocidad por host. |
-| | `max_pps_per_mac`| `2000` | Máximo de paquetes/segundo permitidos por una única MAC antes de alertar. |
-| **[algorithms.flap_guard]**| `enabled` | `true` | Activa/Desactiva la detección de inestabilidad de VLANs. |
-| | `threshold` | `5` | Número de cambios de VLAN permitidos por segundo para una misma MAC. |
-| **[algorithms.arp_watch]** | `enabled` | `true` | Activa/Desactiva la monitorización específica de ARP. |
-| | `max_pps` | `500` | Límite global de peticiones ARP (`WHO-HAS`) por segundo en toda la interfaz. |
-| **[algorithms.dhcp_hunter]** | `enabled` | `true` | Detección de servidores DHCP Rogue. |
-| | `trusted_macs` | `[]` | Lista de MACs autorizadas para enviar DHCPOFFER. |
-| | `trusted_cidrs` | `[]` | Lista de redes (CIDR) autorizadas para enviar ofertas DHCP (ej: `["10.0.0.0/8"]`). |
-| **[algorithms.flow_panic]** | `enabled` | `true` | Detección de inundación de tramas PAUSE (802.3x). |
-| | `max_pause_pps` | `50` | Máximo de tramas de pausa por segundo antes de alertar fallo hardware/DoS. |
-| **[algorithms.ra_guard]** | `enabled` | `true` | Protección contra Rogue IPv6 Router Advertisements. |
-| | `trusted_macs` | `[]` | Únicas MACs permitidas para actuar como Router IPv6. |
-| **[algorithms.mcast_policer]**| `enabled` | `true` | Control de tráfico Multicast. |
-| | `max_pps` | `8000` | Límite global de paquetes multicast por segundo (Video/Clonación). |
+Esta tabla muestra los parámetros globales. **Nota:** La columna "Override" indica si el parámetro puede ser personalizado específicamente para una interfaz usando la sintaxis `[algorithms.X.overrides.interfaz]`.
+
+| Sección | Parámetro | Default | Override | Descripción |
+| :--- | :--- | :--- | :--- | :--- |
+| **[algorithms.etherfuse]** | `enabled` | `true` | No | Activa/Desactiva el análisis de rebote de payloads. |
+| | `history_size` | `4096` | ❌ No | Tamaño del buffer de memoria para hashes. Estático por alocación de RAM. |
+| | `alert_threshold` | `200` | ✅ Sí | Cantidad de veces que un paquete debe repetirse para considerar bucle. |
+| | `storm_pps_limit` | `15000` | ✅ Sí | Umbral de PPS global para considerar tormenta masiva. |
+| **[algorithms.active_probe]**| `enabled` | `true` | No | Activa/Desactiva la inyección activa de sondas. |
+| | `interval_ms` | `1000` | ✅ Sí | Frecuencia de envío de la sonda (milisegundos). |
+| | `ethertype` | `65535` | ❌ No | Protocolo Ethernet (0xFFFF) usado. Global para interoperabilidad. |
+| **[algorithms.mac_storm]** | `enabled` | `true` | No | Activa/Desactiva el limitador de velocidad por host. |
+| | `max_pps_per_mac`| `2000` | ✅ Sí | Máximo de paquetes/segundo permitidos por una única MAC. |
+| **[algorithms.flap_guard]**| `enabled` | `true` | No | Activa/Desactiva la detección de inestabilidad de VLANs. |
+| | `threshold` | `5` | ✅ Sí | Número de cambios de VLAN permitidos por segundo para una misma MAC. |
+| **[algorithms.arp_watch]** | `enabled` | `true` | No | Activa/Desactiva la monitorización específica de ARP. |
+| | `max_pps` | `500` | ✅ Sí | Límite global de peticiones ARP (`WHO-HAS`) por segundo. |
+| **[algorithms.dhcp_hunter]** | `enabled` | `true` | No | Detección de servidores DHCP Rogue. |
+| | `trusted_macs` | `[]` | ✅ Append | Lista de MACs autorizadas (Se suman Global + Override). |
+| | `trusted_cidrs` | `[]` | ✅ Append | Lista de redes (CIDR) autorizadas (Se suman Global + Override). |
+| **[algorithms.flow_panic]** | `enabled` | `true` | No | Detección de inundación de tramas PAUSE (802.3x). |
+| | `max_pause_pps` | `50` | ✅ Sí | Máximo de tramas de pausa por segundo antes de alertar fallo/DoS. |
+| **[algorithms.ra_guard]** | `enabled` | `true` | No | Protección contra Rogue IPv6 Router Advertisements. |
+| | `trusted_macs` | `[]` | ✅ Append | Únicas MACs permitidas para actuar como Router IPv6 (Aditivo). |
+| **[algorithms.mcast_policer]**| `enabled` | `true` | No | Control de tráfico Multicast. |
+| | `max_pps` | `8000` | ✅ Sí | Límite global de paquetes multicast por segundo. |
+
+#### Ejemplo de Configuración con Overrides
+
+```toml
+[algorithms.mac_storm]
+enabled = true
+max_pps_per_mac = 1000  # Límite estricto por defecto (Servidores)
+
+    # Excepción para Wi-Fi (wifi0): Más tolerante con usuarios
+    [algorithms.mac_storm.overrides.wifi0]
+    max_pps_per_mac = 5000
+
+[algorithms.dhcp_hunter]
+trusted_macs = ["AA:BB:CC:DD:EE:FF"] # DHCP Corporativo (Global)
+
+    # Excepción para Laboratorio (eno2): Permite DHCP extra
+    [algorithms.dhcp_hunter.overrides.eno2]
+    trusted_macs = ["00:11:22:33:44:55"] # Resultado en eno2: Global + Local
+```
 
 ### 📊 Telemetría
 
@@ -201,6 +232,22 @@ A continuación se detallan todos los parámetros disponibles en el archivo de c
 LoopWarden viene configurado por defecto para entornos de tamaño medio (Oficinas/PyMEs). En entornos de alta densidad como **Centros Educativos, Universidades o Data Centers**, es necesario ajustar los umbrales para diferenciar tráfico legítimo de anomalías.
 
 Usa esta guía para ajustar `config.toml` según el comportamiento de tu red.
+
+### Estrategia de Configuración (Global vs Local)
+
+Antes de ajustar los números, decide tu estrategia de despliegue para mantener el archivo `config.toml` mantenible.
+
+1.  **La Regla del 80/20:** Configura los valores **Globales** pensando en tus servidores críticos o infraestructura core (donde quieres silencio absoluto y detección rápida). Esto cubrirá el 80% de tus puertos.
+2.  **El "Pozo de Ruido":** Identifica las interfaces que conectan a redes de Usuarios, Wi-Fi de invitados o Laboratorios. Estas redes son ruidosas por naturaleza (mDNS, Broadcasts de Windows, Consolas).
+    *   **No subas el límite global** para acomodar a los usuarios, o dejarás desprotegidos a los servidores.
+    *   **Usa Overrides:** Crea una entrada específica para esa interfaz ruidosa:
+        ```toml
+        [algorithms.arp_watch.overrides.vlan_invitados]
+        max_pps = 2000 # Permitir escaneos de descubrimiento en Wi-Fi
+        ```
+3.  **ActiveProbe en Core vs Acceso:**
+    *   En enlaces **Core (10Gbps)**, usa un intervalo lento (ej: `5000ms`) para no saturar logs o gráficas.
+    *   En enlaces de **Acceso**, usa un intervalo rápido (ej: `override interval_ms = 500`) para detectar el bucle en cuanto el usuario conecte mal el cable.
 
 ### 🧬 EtherFuse (Detección de Rebotes)
 *Detecta paquetes duplicados idénticos.*

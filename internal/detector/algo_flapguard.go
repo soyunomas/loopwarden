@@ -2,6 +2,7 @@ package detector
 
 import (
 	"fmt"
+	"log"
 	"net"
 	"sync"
 	"time"
@@ -9,27 +10,31 @@ import (
 	"github.com/mdlayher/packet"
 	"github.com/soyunomas/loopwarden/internal/config"
 	"github.com/soyunomas/loopwarden/internal/notifier"
-	"github.com/soyunomas/loopwarden/internal/telemetry" // IMPORTAR
+	"github.com/soyunomas/loopwarden/internal/telemetry"
 	"github.com/soyunomas/loopwarden/internal/utils"
 )
 
 const (
-	FlapWindowNano = int64(1 * time.Second) 
+	FlapWindowNano   = int64(1 * time.Second)
 	FlapCooldownNano = int64(30 * time.Second)
-	MaxFlapEntries = 50000
+	MaxFlapEntries   = 50000
 )
 
 type flapEntry struct {
-	lastSeen   int64  
-	lastAlert  int64  
-	lastVLAN   uint16 
-	flapCount  uint16 
+	lastSeen  int64
+	lastAlert int64
+	lastVLAN  uint16
+	flapCount uint16
 }
 
 type FlapGuard struct {
 	cfg    *config.FlapGuardConfig
 	notify *notifier.Notifier
-	mu     sync.Mutex
+	
+	// Configuración Efectiva
+	threshold uint16
+
+	mu       sync.Mutex
 	registry map[[6]byte]flapEntry
 }
 
@@ -44,6 +49,17 @@ func NewFlapGuard(cfg *config.FlapGuardConfig, n *notifier.Notifier) *FlapGuard 
 func (fg *FlapGuard) Name() string { return "FlapGuard" }
 
 func (fg *FlapGuard) Start(conn *packet.Conn, iface *net.Interface) error {
+	// 1. Base
+	fg.threshold = uint16(fg.cfg.Threshold)
+
+	// 2. Override
+	if override, ok := fg.cfg.Overrides[iface.Name]; ok {
+		if override.Threshold > 0 {
+			fg.threshold = uint16(override.Threshold)
+			log.Printf("🔧 [FlapGuard] Override applied for %s: Threshold = %d", iface.Name, fg.threshold)
+		}
+	}
+
 	go func() {
 		ticker := time.NewTicker(30 * time.Second)
 		defer ticker.Stop()
@@ -51,14 +67,14 @@ func (fg *FlapGuard) Start(conn *packet.Conn, iface *net.Interface) error {
 		for range ticker.C {
 			fg.mu.Lock()
 			now := time.Now().UnixNano()
-			expiry := int64(60 * time.Second) 
-			
+			expiry := int64(60 * time.Second)
+
 			if len(fg.registry) > MaxFlapEntries {
 				expiry = int64(10 * time.Second)
 			}
 
 			for mac, entry := range fg.registry {
-				if now - entry.lastSeen > expiry {
+				if now-entry.lastSeen > expiry {
 					delete(fg.registry, mac)
 				}
 			}
@@ -75,7 +91,7 @@ func (fg *FlapGuard) OnPacket(data []byte, length int, vlanID uint16) {
 
 	var srcMac [6]byte
 	copy(srcMac[:], data[6:12])
-	
+
 	now := time.Now().UnixNano()
 
 	fg.mu.Lock()
@@ -86,7 +102,7 @@ func (fg *FlapGuard) OnPacket(data []byte, length int, vlanID uint16) {
 			fg.mu.Unlock()
 			return
 		}
-		
+
 		fg.registry[srcMac] = flapEntry{
 			lastVLAN: vlanID,
 			lastSeen: now,
@@ -105,21 +121,22 @@ func (fg *FlapGuard) OnPacket(data []byte, length int, vlanID uint16) {
 		entry.lastVLAN = vlanID
 		entry.lastSeen = now
 
-		if entry.flapCount >= uint16(fg.cfg.Threshold) {
+		// USAMOS fg.threshold (LOCAL)
+		if entry.flapCount >= fg.threshold {
 			if (now - entry.lastAlert) > FlapCooldownNano {
 				entry.lastAlert = now
-				
+
 				// TELEMETRY HIT
 				telemetry.EngineHits.WithLabelValues("FlapGuard", "MacFlapping").Inc()
 
 				fg.registry[srcMac] = entry
 				fg.mu.Unlock()
-				
+
 				go fg.sendAlert(srcMac, entry.flapCount, vlanID)
 				return
 			}
 		}
-		
+
 		fg.registry[srcMac] = entry
 	} else {
 		if (now - entry.lastSeen) > int64(time.Second) {
@@ -127,15 +144,14 @@ func (fg *FlapGuard) OnPacket(data []byte, length int, vlanID uint16) {
 			fg.registry[srcMac] = entry
 		}
 	}
-	
+
 	fg.mu.Unlock()
 }
 
 func (fg *FlapGuard) sendAlert(mac [6]byte, count uint16, vlanID uint16) {
-	// Clasificación Forense (Cold Path)
 	macSlice := mac[:]
 	info := utils.ClassifyMAC(macSlice)
-	
+
 	macStr := net.HardwareAddr(macSlice).String()
 	identity := "Host"
 	if info.Name != "Unicast" {
@@ -153,6 +169,6 @@ func (fg *FlapGuard) sendAlert(mac [6]byte, count uint16, vlanID uint16) {
 		"    MOVES:    %d times/sec (Current VLAN: %d)\n"+
 		"    ANALYSIS: Device is jumping between VLANs. Possible cabling loop or leaking configuration.",
 		severity, identity, macStr, count, vlanID)
-	
+
 	fg.notify.Alert(msg)
 }

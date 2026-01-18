@@ -3,6 +3,7 @@ package detector
 import (
 	"encoding/binary"
 	"fmt"
+	"log"
 	"net"
 	"sync"
 	"time"
@@ -10,7 +11,7 @@ import (
 	"github.com/mdlayher/packet"
 	"github.com/soyunomas/loopwarden/internal/config"
 	"github.com/soyunomas/loopwarden/internal/notifier"
-	"github.com/soyunomas/loopwarden/internal/telemetry" // IMPORTAR
+	"github.com/soyunomas/loopwarden/internal/telemetry"
 )
 
 const (
@@ -20,9 +21,12 @@ const (
 )
 
 type FlowPanic struct {
-	cfg       *config.FlowPanicConfig
-	notify    *notifier.Notifier
-	mu        sync.Mutex
+	cfg    *config.FlowPanicConfig
+	notify *notifier.Notifier
+	mu     sync.Mutex
+
+	// Configuración Efectiva
+	maxPausePPS uint64
 	
 	packetCount uint64
 	lastReset   time.Time
@@ -40,11 +44,20 @@ func NewFlowPanic(cfg *config.FlowPanicConfig, n *notifier.Notifier) *FlowPanic 
 func (fp *FlowPanic) Name() string { return "FlowPanic" }
 
 func (fp *FlowPanic) Start(conn *packet.Conn, iface *net.Interface) error {
+	// 1. Base Global
+	fp.maxPausePPS = fp.cfg.MaxPausePPS
+
+	// 2. Override
+	if override, ok := fp.cfg.Overrides[iface.Name]; ok {
+		if override.MaxPausePPS > 0 {
+			fp.maxPausePPS = override.MaxPausePPS
+			log.Printf("🔧 [FlowPanic] Override applied for %s: MaxPausePPS = %d", iface.Name, fp.maxPausePPS)
+		}
+	}
 	return nil
 }
 
 func (fp *FlowPanic) OnPacket(data []byte, length int, vlanID uint16) {
-	// Offset logic
 	ethTypeOffset := 12
 	payloadOffset := 14
 	if vlanID != 0 {
@@ -67,23 +80,23 @@ func (fp *FlowPanic) OnPacket(data []byte, length int, vlanID uint16) {
 			
 			now := time.Now()
 			if now.Sub(fp.lastReset) >= time.Second {
-				if fp.packetCount > fp.cfg.MaxPausePPS {
+				// USO DE VARIABLE LOCAL
+				if fp.packetCount > fp.maxPausePPS {
 					if now.Sub(fp.lastAlert) > PauseAlertCooldown {
 						
-						// TELEMETRY HIT
 						telemetry.EngineHits.WithLabelValues("FlowPanic", "PauseFlood").Inc()
 
 						count := fp.packetCount
 						srcMac := net.HardwareAddr(data[6:12]).String()
 						
-						go func(c uint64, mac string) {
+						go func(c uint64, mac string, limit uint64) {
 							msg := fmt.Sprintf("[FlowPanic] ⏸️ PAUSE FRAME FLOOD (DoS)!\n"+
 								"    SOURCE: %s\n"+
 								"    RATE:   %d frames/sec (Limit: %d)\n"+
 								"    IMPACT: Network stuck. NIC hardware failure or loop.",
-								mac, c, fp.cfg.MaxPausePPS)
+								mac, c, limit)
 							fp.notify.Alert(msg)
-						}(count, srcMac)
+						}(count, srcMac, fp.maxPausePPS)
 						
 						fp.lastAlert = now
 					}

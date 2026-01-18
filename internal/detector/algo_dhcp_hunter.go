@@ -5,32 +5,33 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/mdlayher/packet"
 	"github.com/soyunomas/loopwarden/internal/config"
 	"github.com/soyunomas/loopwarden/internal/notifier"
-	"github.com/soyunomas/loopwarden/internal/telemetry" // IMPORTAR
+	"github.com/soyunomas/loopwarden/internal/telemetry"
 )
 
 const (
-	EtherTypeIPv4 = 0x0800
-	IPProtoUDP    = 17
+	EtherTypeIPv4  = 0x0800
+	IPProtoUDP     = 17
 	DhcpServerPort = 67
 	DhcpClientPort = 68
 	DhcpCooldown   = 10 * time.Second
 )
 
 type DhcpHunter struct {
-	cfg          *config.DhcpHunterConfig
-	notify       *notifier.Notifier
+	cfg         *config.DhcpHunterConfig
+	notify      *notifier.Notifier
 	
-	trustedMacs  map[string]bool
-	trustedNets  []*net.IPNet
+	trustedMacs map[string]bool
+	trustedNets []*net.IPNet
 	
-	mu           sync.Mutex
-	lastAlert    time.Time
+	mu        sync.Mutex
+	lastAlert time.Time
 }
 
 func NewDhcpHunter(cfg *config.DhcpHunterConfig, n *notifier.Notifier) *DhcpHunter {
@@ -45,28 +46,55 @@ func NewDhcpHunter(cfg *config.DhcpHunterConfig, n *notifier.Notifier) *DhcpHunt
 func (d *DhcpHunter) Name() string { return "DhcpHunter" }
 
 func (d *DhcpHunter) Start(conn *packet.Conn, iface *net.Interface) error {
-	// Pre-compile Trusted MACs (Map lookup is O(1))
-	for _, m := range d.cfg.TrustedMacs {
-		mac, err := net.ParseMAC(m)
+	// 1. Construir lista maestra de MACs (Global + Override)
+	// Usamos slice intermedio para mantener el orden y claridad
+	var rawMacs []string
+	
+	// A. Añadir Globales
+	rawMacs = append(rawMacs, d.cfg.TrustedMacs...)
+	
+	// B. Añadir Overrides (Si existen para esta interfaz)
+	if override, ok := d.cfg.Overrides[iface.Name]; ok {
+		log.Printf("🔧 [DhcpHunter] Applying overrides for interface %s (Extra MACs: %d, Extra CIDRs: %d)", 
+			iface.Name, len(override.TrustedMacs), len(override.TrustedCidrs))
+		rawMacs = append(rawMacs, override.TrustedMacs...)
+	}
+
+	// 2. Procesar y Normalizar MACs
+	for _, m := range rawMacs {
+		// Limpieza de inputs: Trim espacios y LowerCase
+		cleanM := strings.ToLower(strings.TrimSpace(m))
+		
+		mac, err := net.ParseMAC(cleanM)
 		if err == nil {
 			d.trustedMacs[mac.String()] = true
 		} else {
-			log.Printf("⚠️ [DhcpHunter] Invalid trusted MAC: %s", m)
+			log.Printf("⚠️ [DhcpHunter] Invalid trusted MAC ignored: '%s'", m)
 		}
 	}
 
-	// Pre-compile Trusted CIDRs
-	for _, cidr := range d.cfg.TrustedCidrs {
-		_, network, err := net.ParseCIDR(cidr)
+	// 3. Construir lista maestra de CIDRs (Global + Override)
+	var rawCidrs []string
+	rawCidrs = append(rawCidrs, d.cfg.TrustedCidrs...)
+	
+	if override, ok := d.cfg.Overrides[iface.Name]; ok {
+		rawCidrs = append(rawCidrs, override.TrustedCidrs...)
+	}
+
+	// 4. Procesar CIDRs
+	for _, cidr := range rawCidrs {
+		cleanCidr := strings.TrimSpace(cidr)
+		_, network, err := net.ParseCIDR(cleanCidr)
 		if err == nil {
 			d.trustedNets = append(d.trustedNets, network)
 		} else {
-			log.Printf("⚠️ [DhcpHunter] Invalid trusted CIDR: %s", cidr)
+			log.Printf("⚠️ [DhcpHunter] Invalid trusted CIDR ignored: '%s'", cidr)
 		}
 	}
 	
-	log.Printf("✅ [DhcpHunter] Active. Protecting against Rogue Servers (Trusted: %d MACs, %d Subnets)", 
-		len(d.trustedMacs), len(d.trustedNets))
+	log.Printf("✅ [DhcpHunter:%s] Active. AllowList: %d MACs, %d Subnets", 
+		iface.Name, len(d.trustedMacs), len(d.trustedNets))
+	
 	return nil
 }
 
@@ -126,16 +154,18 @@ func (d *DhcpHunter) OnPacket(data []byte, length int, vlanID uint16) {
 		
 		// 4. Security Check
 		srcMacSlice := data[6:12]
+		// Normalización en Hot Path: net.HardwareAddr.String() devuelve lower-case por defecto.
 		srcMacStr := net.HardwareAddr(srcMacSlice).String()
 		
 		isTrusted := false
 
-		// Check 1: Trusted MAC
+		// Check 1: Trusted MAC (Map Lookup O(1))
 		if d.trustedMacs[srcMacStr] {
 			isTrusted = true
 		}
 
-		// Check 2: Trusted CIDR
+		// Check 2: Trusted CIDR (Linear Scan)
+		// Solo si no pasó por MAC, para ahorrar CPU.
 		if !isTrusted {
 			for _, net := range d.trustedNets {
 				if net.Contains(srcIP) {

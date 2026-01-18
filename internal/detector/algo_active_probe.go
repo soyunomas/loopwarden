@@ -22,7 +22,12 @@ type ActiveProbe struct {
 	cfg        *config.ActiveProbeConfig
 	notify     *notifier.Notifier
 	myMAC      net.HardwareAddr
-	ifaceName  string // <--- CONCIENCIA DE IDENTIDAD
+	ifaceName  string
+	
+	// Configuración Efectiva
+	intervalMs int
+	ethertype  uint16
+	
 	probeFrame []byte
 	destAddr   *packet.Addr
 
@@ -30,7 +35,6 @@ type ActiveProbe struct {
 	lastAlert time.Time
 }
 
-// NewActiveProbe ahora recibe el nombre de la interfaz
 func NewActiveProbe(cfg *config.ActiveProbeConfig, n *notifier.Notifier, ifaceName string) *ActiveProbe {
 	return &ActiveProbe{
 		cfg:       cfg,
@@ -45,17 +49,30 @@ func (ap *ActiveProbe) Name() string {
 
 func (ap *ActiveProbe) Start(conn *packet.Conn, iface *net.Interface) error {
 	ap.myMAC = iface.HardwareAddr
-	broadcastHW := net.HardwareAddr{0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF}
+	
+	// 1. Calcular Configuración Efectiva
+	ap.intervalMs = ap.cfg.IntervalMs
+	ap.ethertype = ap.cfg.Ethertype
 
+	if override, ok := ap.cfg.Overrides[iface.Name]; ok {
+		if override.IntervalMs > 0 {
+			ap.intervalMs = override.IntervalMs
+			log.Printf("🔧 [ActiveProbe] Override applied for %s: Interval = %dms", iface.Name, ap.intervalMs)
+		}
+		// Ethertype es raro sobrescribirlo, pero el struct lo permite, así que lo respetamos
+		// Nota: ActiveProbeOverride no tenía Ethertype en config.go, pero si lo tuviera, aquí iría.
+		// Asumiendo que config.go en ActiveProbeOverride solo tiene IntervalMs según tu ejemplo anterior.
+	}
+
+	broadcastHW := net.HardwareAddr{0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF}
 	ap.destAddr = &packet.Addr{
 		HardwareAddr: broadcastHW,
 	}
 
 	typeBytes := make([]byte, 2)
-	binary.BigEndian.PutUint16(typeBytes, ap.cfg.Ethertype)
+	binary.BigEndian.PutUint16(typeBytes, ap.ethertype)
 
 	// --- GENERACIÓN DE PAYLOAD CON IDENTIDAD ---
-	// Formato: "MAGIC_PAYLOAD|INTERFACE_NAME"
 	fullPayload := fmt.Sprintf("%s|%s", ap.cfg.MagicPayload, ap.ifaceName)
 	payloadBytes := []byte(fullPayload)
 
@@ -67,10 +84,11 @@ func (ap *ActiveProbe) Start(conn *packet.Conn, iface *net.Interface) error {
 
 	ap.probeFrame = frame
 
-	log.Printf("[%s] ActiveProbe Initialized. Sending identity probes '%s'", ap.ifaceName, fullPayload)
+	log.Printf("[%s] ActiveProbe Initialized. Frequency: %dms", ap.ifaceName, ap.intervalMs)
 
+	// 2. Usar Intervalo Efectivo en el Ticker
 	go func() {
-		ticker := time.NewTicker(time.Duration(ap.cfg.IntervalMs) * time.Millisecond)
+		ticker := time.NewTicker(time.Duration(ap.intervalMs) * time.Millisecond)
 		defer ticker.Stop()
 
 		for range ticker.C {
@@ -95,32 +113,26 @@ func (ap *ActiveProbe) OnPacket(data []byte, length int, vlanID uint16) {
 
 	srcMac := data[6:12]
 
-	// Solo analizamos si viene de NOSOTROS (es decir, el paquete dio la vuelta)
 	if bytes.Equal(srcMac, ap.myMAC) {
 		etherType := binary.BigEndian.Uint16(data[etherTypeOffset : etherTypeOffset+2])
 
-		if etherType == ap.cfg.Ethertype {
+		// Usamos variable local ap.ethertype
+		if etherType == ap.ethertype {
 			payload := data[headerSize:length]
 			
-			// Buscamos el separador mágico para extraer la identidad
-			// Usamos el prefijo mágico configurado
 			magic := []byte(ap.cfg.MagicPayload + "|")
 			
 			if bytes.Contains(payload, magic) {
 				ap.mu.Lock()
-				defer ap.mu.Unlock() // Defer es aceptable aquí (Cold path relative)
+				defer ap.mu.Unlock()
 				
 				now := time.Now()
 				if now.Sub(ap.lastAlert) > ProbeAlertCooldown {
 					
-					// Extracción de origen (Parsing zero-alloc style si fuera crítico, aquí string es OK)
-					// Buscamos dónde empieza el magic
 					idx := bytes.Index(payload, magic)
-					if idx == -1 { return } // Should not happen due to Contains check
+					if idx == -1 { return }
 
-					// El sufijo comienza después del magic
 					startSuffix := idx + len(magic)
-					// Limpiamos padding (0x00) si existe
 					suffixBytes := payload[startSuffix:]
 					nullIdx := bytes.IndexByte(suffixBytes, 0)
 					if nullIdx != -1 {
@@ -128,18 +140,15 @@ func (ap *ActiveProbe) OnPacket(data []byte, length int, vlanID uint16) {
 					}
 					remoteIface := string(suffixBytes)
 
-					// --- LÓGICA DE DETECCIÓN CRUZADA ---
 					var alertMsg string
 					var alertType string
 
 					if remoteIface == ap.ifaceName {
-						// CASO A: SELF LOOP
 						alertType = "HardLoop"
 						alertMsg = fmt.Sprintf("[%s] 🚨 LOOP CONFIRMED! (Self-Loop)\n"+
 							"    STATUS: Cable connects interface %s back to itself via switch.\n"+
 							"    ACTION: IMMEDIATE DISCONNECT.", ap.ifaceName, ap.ifaceName)
 					} else {
-						// CASO B: CROSS LOOP
 						alertType = "CrossDomainLoop"
 						alertMsg = fmt.Sprintf("[%s] ☣️ CRITICAL TOPOLOGY ERROR (Cross-Domain)!\n"+
 							"    DETECTED: Physical bridge between two different networks.\n"+
@@ -148,10 +157,8 @@ func (ap *ActiveProbe) OnPacket(data []byte, length int, vlanID uint16) {
 							ap.ifaceName, remoteIface, ap.ifaceName)
 					}
 
-					// TELEMETRY
 					telemetry.EngineHits.WithLabelValues("ActiveProbe", alertType).Inc()
 					
-					// Capturamos MAC destino para info extra
 					dstMac := data[0:6]
 					retInfo := utils.ClassifyMAC(dstMac)
 					
