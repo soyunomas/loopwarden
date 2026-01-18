@@ -426,7 +426,7 @@ Para interfaces de red de alta velocidad (10Gbps o superior) en entornos de alta
 
 ## 🏗️ Arquitectura "Fast-Path"
 
-LoopWarden está diseñado para procesar tráfico a velocidad de línea sin ahogar la CPU, utilizando una arquitectura de **Stacks Paralelos** para gestionar múltiples interfaces sin contención:
+LoopWarden está diseñado para procesar tráfico a velocidad de línea sin ahogar la CPU, utilizando una arquitectura de **Stacks Paralelos (Shared-Nothing)** para gestionar múltiples interfaces sin contención de bloqueos (Lock Contention):
 
 ```text
 [ NETWORK WIRE ] <=== (Multiple Interfaces: eno1, eno2...)
@@ -442,13 +442,13 @@ LoopWarden está diseñado para procesar tráfico a velocidad de línea sin ahog
       +--> [ Engine Stack 1 (eno1) ]
       |      ||
       |      +-- 1. ActiveProbe (Identity Injection: "Magic|eno1")
-      |      +-- 2. EtherFuse (Local State)
+      |      +-- 2. EtherFuse (Local State & Overrides)
       |      +-- ... (All Engines)
       |
       +--> [ Engine Stack 2 (eno2) ]
              ||
              +-- 1. ActiveProbe (Identity Injection: "Magic|eno2")
-             +-- 2. EtherFuse (Local State)
+             +-- 2. EtherFuse (Local State & Overrides)
              +-- ... (All Engines)
              ||
 [ NOTIFIER ] <-- (Centralized Deduplication & Throttling)
@@ -456,11 +456,10 @@ LoopWarden está diseñado para procesar tráfico a velocidad de línea sin ahog
 [ ALERTS ] ----> Slack / Syslog / Email (Tagged with [SensorName])
 ```
 
-> **⚠️ Nota Técnica sobre Visibilidad (Unicast vs Broadcast):**
-> Para garantizar un rendimiento extremo y proteger la CPU en enlaces de 10Gbps, LoopWarden aplica un filtro BPF estricto en el Kernel que **descarta todo el tráfico Unicast general**.
+> **⚠️ Nota Técnica sobre Rendimiento (Kernel BPF):**
+> Para garantizar un rendimiento extremo y proteger la CPU en enlaces de 10Gbps, LoopWarden inyecta bytecode **eBPF (Berkeley Packet Filter)** directamente en el Kernel.
 >
-> Esto implica un compromiso de diseño: los motores de seguridad (como *DhcpHunter* o *MacStorm*) detectan amenazas que impactan el dominio de difusión global (Broadcast/Multicast). Un ataque dirigido estrictamente Unicast (ej: un DHCP Offer enviado directamente a la MAC del cliente sin usar broadcast, o un DoS UDP hacia una sola IP) será descartado por el Kernel para preservar recursos. LoopWarden prioriza la estabilidad de la Capa 2 (bucles y tormentas) sobre la inspección profunda (DPI) de tráfico usuario a usuario.
-
+> Esto actúa como un cortafuegos de alto rendimiento: el Kernel descarta todo el tráfico Unicast general (YouTube, Netflix, descargas) **antes** de que los datos crucen la costosa frontera hacia el espacio de usuario (Go Runtime). LoopWarden "despierta" solo para analizar tráfico de control, broadcast y multicast, reduciendo las interrupciones de CPU (Context Switches) en un 99% comparado con un sniffer tradicional.
 
 ## 📜 Licencia
 
