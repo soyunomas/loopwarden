@@ -143,18 +143,19 @@ func (ap *ActiveProbe) OnPacket(data []byte, length int, vlanID uint16) {
 					if remoteIface == ap.ifaceName {
 						alertType = "HardLoop"
 						alertMsg = fmt.Sprintf("[%s] 🚨 LOOP CONFIRMED! (Self-Loop)\n"+
-							"    STATUS: Cable connects interface %s back to itself via switch.\n"+
-							"    ACTION: IMMEDIATE DISCONNECT.", ap.ifaceName, ap.ifaceName)
+							"    INTERFACE: %s\n"+
+							"    STATUS:    Cable connects interface back to itself.\n"+
+							"    ACTION:    IMMEDIATE DISCONNECT.", ap.ifaceName, ap.ifaceName)
 					} else {
 						alertType = "CrossDomainLoop"
 						alertMsg = fmt.Sprintf("[%s] ☣️ CRITICAL TOPOLOGY ERROR (Cross-Domain)!\n"+
-							"    DETECTED: Physical bridge between two different networks.\n"+
-							"    PATH:     [Remote: %s]  ===>  [Local: %s]\n"+
-							"    ACTION:   Check cabling between these two segments immediately.", 
-							ap.ifaceName, remoteIface, ap.ifaceName)
+							"    INTERFACE: %s\n"+
+							"    DETECTED:  Physical bridge between two different networks.\n"+
+							"    PATH:      [Remote: %s]  ===>  [Local: %s]\n"+
+							"    ACTION:    Check cabling between these two segments immediately.", 
+							ap.ifaceName, ap.ifaceName, remoteIface, ap.ifaceName)
 					}
 
-					// UPDATED: Added ap.ifaceName label
 					telemetry.EngineHits.WithLabelValues(ap.ifaceName, "ActiveProbe", alertType).Inc()
 					
 					dstMac := data[0:6]
@@ -162,6 +163,8 @@ func (ap *ActiveProbe) OnPacket(data []byte, length int, vlanID uint16) {
 					
 					fullMsg := fmt.Sprintf("%s\n    RETURN PATH: %s", alertMsg, retInfo.Description)
 					
+					// ActiveProbe constructs message in sync path (under lock) for safety, 
+					// but dispatch is async in notifier.
 					go ap.notify.Alert(fullMsg)
 
 					ap.lastAlert = now

@@ -167,20 +167,24 @@ func (d *DhcpHunter) OnPacket(data []byte, length int, vlanID uint16) {
 				capturedSrcIP := srcIP.String()
 				capturedSrcMAC := srcMacStr
 				
-				go func(ip, mac string, vlan uint16) {
+				// CAPTURE VARIABLE FOR SAFETY
+				currentIface := d.ifaceName
+				
+				go func(iface, ip, mac string, vlan uint16) {
 					vlanStr := "Native"
 					if vlan != 0 {
 						vlanStr = fmt.Sprintf("%d", vlan)
 					}
 					
 					msg := fmt.Sprintf("[DhcpHunter] 🚨 ROGUE DHCP SERVER DETECTED!\n"+
+						"    INTERFACE: %s\n"+
 						"    VLAN:      %s\n"+
 						"    ROGUE MAC: %s\n"+
 						"    ROGUE IP:  %s\n"+
 						"    ACTION:    Investigate immediately. Possible Man-in-the-Middle.",
-						vlanStr, mac, ip)
+						iface, vlanStr, mac, ip)
 					d.notify.Alert(msg)
-				}(capturedSrcIP, capturedSrcMAC, vlanID)
+				}(currentIface, capturedSrcIP, capturedSrcMAC, vlanID)
 				
 				d.lastAlert = now
 			}

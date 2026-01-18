@@ -129,13 +129,15 @@ func (fg *FlapGuard) OnPacket(data []byte, length int, vlanID uint16) {
 				entry.lastAlert = now
 
 				// TELEMETRY HIT
-				// UPDATED: Added fg.ifaceName label
 				telemetry.EngineHits.WithLabelValues(fg.ifaceName, "FlapGuard", "MacFlapping").Inc()
 
 				fg.registry[srcMac] = entry
 				fg.mu.Unlock()
 
-				go fg.sendAlert(srcMac, entry.flapCount, vlanID)
+				// CAPTURE VARIABLE FOR SAFETY
+				currentIface := fg.ifaceName
+
+				go fg.sendAlert(currentIface, srcMac, entry.flapCount, vlanID)
 				return
 			}
 		}
@@ -151,7 +153,8 @@ func (fg *FlapGuard) OnPacket(data []byte, length int, vlanID uint16) {
 	fg.mu.Unlock()
 }
 
-func (fg *FlapGuard) sendAlert(mac [6]byte, count uint16, vlanID uint16) {
+// sendAlert explicitly accepts ifaceName string to ensure thread safety
+func (fg *FlapGuard) sendAlert(iface string, mac [6]byte, count uint16, vlanID uint16) {
 	macSlice := mac[:]
 	info := utils.ClassifyMAC(macSlice)
 
@@ -167,11 +170,12 @@ func (fg *FlapGuard) sendAlert(mac [6]byte, count uint16, vlanID uint16) {
 	}
 
 	msg := fmt.Sprintf("[FlapGuard] %s: TOPOLOGY CHANGE DETECTED!\n"+
-		"    IDENTITY: %s\n"+
-		"    MAC:      %s\n"+
-		"    MOVES:    %d times/sec (Current VLAN: %d)\n"+
-		"    ANALYSIS: Device is jumping between VLANs. Possible cabling loop or leaking configuration.",
-		severity, identity, macStr, count, vlanID)
+		"    INTERFACE: %s\n"+
+		"    IDENTITY:  %s\n"+
+		"    MAC:       %s\n"+
+		"    MOVES:     %d times/sec (Current VLAN: %d)\n"+
+		"    ANALYSIS:  Device is jumping between VLANs. Possible cabling loop or leaking configuration.",
+		severity, iface, identity, macStr, count, vlanID)
 
 	fg.notify.Alert(msg)
 }

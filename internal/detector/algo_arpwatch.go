@@ -158,6 +158,9 @@ func (aw *ArpWatchdog) analyzeAndReset() {
 	aw.mu.Lock()
 	defer aw.mu.Unlock()
 
+	// CAPTURE VARIABLE FOR SAFETY (Though inside lock, it's safer for the goroutine call)
+	currentIface := aw.ifaceName
+
 	for macArray, stats := range aw.sources {
 		uniqueTargets := len(stats.targets)
 		isScanning := uniqueTargets > ScanThresholdIPs
@@ -190,21 +193,21 @@ func (aw *ArpWatchdog) analyzeAndReset() {
 					details = fmt.Sprintf("Multiple Targets (%d IPs)", uniqueTargets)
 				}
 
-				// UPDATED: Added aw.ifaceName label
 				telemetry.EngineHits.WithLabelValues(aw.ifaceName, "ArpWatchdog", metricType).Inc()
 
 				capturedPPS := stats.pps
 				capturedMAC := net.HardwareAddr(macArray[:]).String()
 
-				go func(m, p, d string, rate uint64, lim uint64) {
+				go func(iface, m, p, d string, rate uint64, lim uint64) {
 					msg := fmt.Sprintf("[ArpWatchdog] 🐶 DISCOVERY STORM DETECTED!\n"+
+						"    INTERFACE:  %s\n"+
 						"    RATE:       %d req/s (Threshold: %d)\n"+
 						"    SOURCE:     %s\n"+
 						"    PATTERN:    %s\n"+
 						"    DETAILS:    %s",
-						rate, lim, m, p, d)
+						iface, rate, lim, m, p, d)
 					aw.notify.Alert(msg)
-				}(capturedMAC, pattern, details, capturedPPS, threshold)
+				}(currentIface, capturedMAC, pattern, details, capturedPPS, threshold)
 
 				aw.alertRegistry[macArray] = time.Now()
 			}

@@ -92,14 +92,18 @@ func (fp *FlowPanic) OnPacket(data []byte, length int, vlanID uint16) {
 						count := fp.packetCount
 						srcMac := net.HardwareAddr(data[6:12]).String()
 						
-						go func(c uint64, mac string, limit uint64) {
+						// CAPTURE VARIABLE FOR SAFETY
+						currentIface := fp.ifaceName
+
+						go func(iface string, c uint64, mac string, limit uint64) {
 							msg := fmt.Sprintf("[FlowPanic] ⏸️ PAUSE FRAME FLOOD (DoS)!\n"+
-								"    SOURCE: %s\n"+
-								"    RATE:   %d frames/sec (Limit: %d)\n"+
-								"    IMPACT: Network stuck. NIC hardware failure or loop.",
-								mac, c, limit)
+								"    INTERFACE: %s\n"+
+								"    SOURCE:    %s\n"+
+								"    RATE:      %d frames/sec (Limit: %d)\n"+
+								"    IMPACT:    Network stuck. NIC hardware failure or loop.",
+								iface, mac, c, limit)
 							fp.notify.Alert(msg)
-						}(count, srcMac, fp.maxPausePPS)
+						}(currentIface, count, srcMac, fp.maxPausePPS)
 						
 						fp.lastAlert = now
 					}

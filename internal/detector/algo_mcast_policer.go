@@ -79,18 +79,23 @@ func (mp *McastPolicer) OnPacket(data []byte, length int, vlanID uint16) {
 					telemetry.EngineHits.WithLabelValues(mp.ifaceName, "McastPolicer", "MulticastStorm").Inc()
 					
 					pps := mp.packetCount
-					go func(count uint64, vlan uint16, limit uint64) {
+					
+					// CAPTURE VARIABLE FOR SAFETY
+					currentIface := mp.ifaceName
+
+					go func(iface string, count uint64, vlan uint16, limit uint64) {
 						vlanStr := "Native"
 						if vlan != 0 {
 							vlanStr = fmt.Sprintf("%d", vlan)
 						}
 						msg := fmt.Sprintf("[McastPolicer] 👻 MULTICAST STORM DETECTED!\n"+
-							"    VLAN:  %s\n"+
-							"    RATE:  %d pps (Limit: %d)\n"+
-							"    CAUSE: Likely Ghost/FOG cloning or Video Streaming gone wrong.",
-							vlanStr, count, limit)
+							"    INTERFACE: %s\n"+
+							"    VLAN:      %s\n"+
+							"    RATE:      %d pps (Limit: %d)\n"+
+							"    CAUSE:     Likely Ghost/FOG cloning or Video Streaming gone wrong.",
+							iface, vlanStr, count, limit)
 						mp.notify.Alert(msg)
-					}(pps, vlanID, mp.maxPPS)
+					}(currentIface, pps, vlanID, mp.maxPPS)
 
 					mp.lastAlert = now
 				}

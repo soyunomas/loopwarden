@@ -113,7 +113,6 @@ func (ms *MacStorm) OnPacket(data []byte, length int, vlanID uint16) {
 		if !hasAlerted || time.Since(lastAlert) > MacAlertCooldown {
 
 			// TELEMETRY HIT
-			// UPDATED: Added ms.ifaceName label
 			telemetry.EngineHits.WithLabelValues(ms.ifaceName, "MacStorm", "HostFlood").Inc()
 
 			ms.alertState[srcMac] = time.Now()
@@ -123,7 +122,10 @@ func (ms *MacStorm) OnPacket(data []byte, length int, vlanID uint16) {
 			var dstMacSample [6]byte
 			copy(dstMacSample[:], data[0:6])
 
-			go ms.sendAlert(srcMac, dstMacSample, newCount, vlanID)
+			// CAPTURE VARIABLE FOR SAFETY
+			currentIface := ms.ifaceName
+
+			go ms.sendAlert(currentIface, srcMac, dstMacSample, newCount, vlanID)
 			return
 		}
 	}
@@ -131,7 +133,8 @@ func (ms *MacStorm) OnPacket(data []byte, length int, vlanID uint16) {
 	ms.mu.Unlock()
 }
 
-func (ms *MacStorm) sendAlert(srcMac [6]byte, dstSample [6]byte, count uint64, vlanID uint16) {
+// sendAlert now accepts 'ifaceName' explicitly to avoid closure capture issues
+func (ms *MacStorm) sendAlert(iface string, srcMac [6]byte, dstSample [6]byte, count uint64, vlanID uint16) {
 	location := "Native VLAN"
 	if vlanID != 0 {
 		location = fmt.Sprintf("VLAN %d", vlanID)
@@ -148,11 +151,12 @@ func (ms *MacStorm) sendAlert(srcMac [6]byte, dstSample [6]byte, count uint64, v
 	srcStr := net.HardwareAddr(srcMac[:]).String()
 
 	msg := fmt.Sprintf("[MacStorm] 🌪️ HOST FLOODING DETECTED!\n"+
-		"    VLAN:    %s\n"+
-		"    HOST:    %s\n"+
-		"    RATE:    > %d pps (Current: %d)\n"+
-		"    PATTERN: Flooding %s",
-		location, srcStr, ms.limitPPS, count, floodType)
+		"    INTERFACE: %s\n"+
+		"    VLAN:      %s\n"+
+		"    HOST:      %s\n"+
+		"    RATE:      > %d pps (Current: %d)\n"+
+		"    PATTERN:   Flooding %s",
+		iface, location, srcStr, ms.limitPPS, count, floodType)
 
 	ms.notify.Alert(msg)
 }

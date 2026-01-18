@@ -66,7 +66,7 @@ func (ef *EtherFuse) Start(conn *packet.Conn, iface *net.Interface) error {
 		if override.StormPPSLimit > 0 {
 			ef.stormPPSLimit = override.StormPPSLimit
 		}
-		log.Printf("🔧 [EtherFuse] Override applied for %s: Threshold=%d, StormLimit=%d", 
+		log.Printf("🔧 [EtherFuse] Override applied for %s: Threshold=%d, StormLimit=%d",
 			iface.Name, ef.alertThreshold, ef.stormPPSLimit)
 	}
 	return nil
@@ -97,13 +97,22 @@ func (ef *EtherFuse) OnPacket(data []byte, length int, vlanID uint16) {
 				if now.Sub(ef.lastAlertTime) > 5*time.Second {
 					// UPDATED: Added ef.ifaceName label
 					telemetry.EngineHits.WithLabelValues(ef.ifaceName, "EtherFuse", "GlobalStorm").Inc()
-					
+
 					loc := "Native"
-					if vlanID != 0 { loc = fmt.Sprintf("%d", vlanID) }
+					if vlanID != 0 {
+						loc = fmt.Sprintf("%d", vlanID)
+					}
 					pps := ef.packetsSec
-					go func(l string, p uint64) {
-						ef.notify.Alert(fmt.Sprintf("[EtherFuse] ⛈️ GLOBAL STORM DETECTED! VLAN: %s | Rate: %d pps", l, p))
-					}(loc, pps)
+					
+					// CAPTURE VARIABLE FOR SAFETY
+					currentIface := ef.ifaceName
+
+					go func(iface string, l string, p uint64) {
+						ef.notify.Alert(fmt.Sprintf("[EtherFuse] ⛈️ GLOBAL STORM DETECTED!\n"+
+							"    INTERFACE: %s\n"+
+							"    VLAN:      %s\n"+
+							"    RATE:      %d pps", iface, l, p))
+					}(currentIface, loc, pps)
 					ef.lastAlertTime = now
 				}
 			}
@@ -121,7 +130,7 @@ func (ef *EtherFuse) OnPacket(data []byte, length int, vlanID uint16) {
 
 		if int(newCount) > ef.alertThreshold {
 			if time.Since(ef.lastAlertTime) > 5*time.Second {
-				
+
 				// UPDATED: Added ef.ifaceName label
 				telemetry.EngineHits.WithLabelValues(ef.ifaceName, "EtherFuse", "LoopDetected").Inc()
 
@@ -137,8 +146,11 @@ func (ef *EtherFuse) OnPacket(data []byte, length int, vlanID uint16) {
 				if vlanID != 0 {
 					vlanStr = fmt.Sprintf("%d", vlanID)
 				}
+				
+				// CAPTURE VARIABLE FOR SAFETY
+				currentIface := ef.ifaceName
 
-				go func(v string, sMac, dMac []byte, h uint64, reps uint8) {
+				go func(iface string, v string, sMac, dMac []byte, h uint64, reps uint8) {
 					targetInfo := utils.ClassifyMAC(dMac)
 					impact := "User Traffic"
 					if targetInfo.IsCritical {
@@ -149,16 +161,17 @@ func (ef *EtherFuse) OnPacket(data []byte, length int, vlanID uint16) {
 					dstStr := net.HardwareAddr(dMac).String()
 
 					msg := fmt.Sprintf("[EtherFuse] 🚨 LOOP DETECTED!\n"+
+						"    INTERFACE:   %s\n"+
 						"    VLAN:        %s\n"+
 						"    SOURCE MAC:  %s\n"+
 						"    TARGET MAC:  %s (%s)\n"+
 						"    PROTOCOL:    %s\n"+
 						"    IMPACT:      %s\n"+
-						"    REPETITIONS: %d (Hash: %x)", 
-						v, srcStr, dstStr, targetInfo.Name, targetInfo.Description, impact, reps, h)
+						"    REPETITIONS: %d (Hash: %x)",
+						iface, v, srcStr, dstStr, targetInfo.Name, targetInfo.Description, impact, reps, h)
 
 					ef.notify.Alert(msg)
-				}(vlanStr, srcMacBytes, dstMacBytes, sum, newCount)
+				}(currentIface, vlanStr, srcMacBytes, dstMacBytes, sum, newCount)
 
 				ef.lastAlertTime = time.Now()
 			}

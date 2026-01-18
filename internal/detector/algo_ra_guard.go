@@ -114,19 +114,23 @@ func (r *RaGuard) OnPacket(data []byte, length int, vlanID uint16) {
 					srcIP := net.IP(data[ethOffset+8 : ethOffset+24])
 					ipStr := srcIP.String()
 
-					go func(mac, ip string, vlan uint16) {
+					// CAPTURE VARIABLE FOR SAFETY
+					currentIface := r.ifaceName
+
+					go func(iface, mac, ip string, vlan uint16) {
 						vlanStr := "Native"
 						if vlan != 0 {
 							vlanStr = fmt.Sprintf("%d", vlan)
 						}
 						msg := fmt.Sprintf("[RaGuard] 📡 ROGUE IPv6 ROUTER ADVERTISEMENT!\n"+
+							"    INTERFACE: %s\n"+
 							"    VLAN:      %s\n"+
 							"    ROGUE MAC: %s\n"+
 							"    ROGUE IP:  %s\n"+
 							"    IMPACT:    Clients will lose connectivity (Man-in-the-Middle).",
-							vlanStr, mac, ip)
+							iface, vlanStr, mac, ip)
 						r.notify.Alert(msg)
-					}(srcMacStr, ipStr, vlanID)
+					}(currentIface, srcMacStr, ipStr, vlanID)
 
 					r.lastAlert = now
 				}
