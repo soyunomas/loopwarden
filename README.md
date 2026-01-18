@@ -457,9 +457,8 @@ LoopWarden está diseñado para procesar tráfico a velocidad de línea sin ahog
 ```
 
 > **⚠️ Nota Técnica sobre Rendimiento (Kernel BPF):**
-> Para garantizar un rendimiento extremo y proteger la CPU en enlaces de 10Gbps, LoopWarden inyecta bytecode **eBPF (Berkeley Packet Filter)** directamente en el Kernel.
->
-> Esto actúa como un cortafuegos de alto rendimiento: el Kernel descarta todo el tráfico Unicast general (YouTube, Netflix, descargas) **antes** de que los datos crucen la costosa frontera hacia el espacio de usuario (Go Runtime). LoopWarden "despierta" solo para analizar tráfico de control, broadcast y multicast, reduciendo las interrupciones de CPU (Context Switches) en un 99% comparado con un sniffer tradicional.
+> LoopWarden utiliza Filtros BPF en Kernel-Space (cBPF JIT). Esto descarta el tráfico Unicast irrelevante antes de que cruce la frontera User-Space, evitando cambios de contexto costosos y garantizando el procesamiento a velocidad de línea sin saturar la CPU.
+
 
 ## 📜 Licencia
 
