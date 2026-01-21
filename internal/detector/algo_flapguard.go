@@ -15,9 +15,7 @@ import (
 )
 
 const (
-	FlapWindowNano   = int64(1 * time.Second)
-	FlapCooldownNano = int64(30 * time.Second)
-	MaxFlapEntries   = 50000
+	MaxFlapEntries = 50000
 )
 
 type flapEntry struct {
@@ -30,10 +28,12 @@ type flapEntry struct {
 type FlapGuard struct {
 	cfg       *config.FlapGuardConfig
 	notify    *notifier.Notifier
-	ifaceName string // Identidad de la interfaz
+	ifaceName string 
 	
-	// Configuración Efectiva
-	threshold uint16
+	// --- Configuración Efectiva (Hot Path Optimized: int64 Nano) ---
+	threshold    uint16
+	windowNano   int64
+	cooldownNano int64
 
 	mu       sync.Mutex
 	registry map[[6]byte]flapEntry
@@ -51,17 +51,52 @@ func NewFlapGuard(cfg *config.FlapGuardConfig, n *notifier.Notifier, ifaceName s
 func (fg *FlapGuard) Name() string { return "FlapGuard" }
 
 func (fg *FlapGuard) Start(conn *packet.Conn, iface *net.Interface) error {
-	// 1. Base
+	// 1. Defaults Globales
 	fg.threshold = uint16(fg.cfg.Threshold)
+	
+	// Parseo de Window Global
+	winDur, err := time.ParseDuration(fg.cfg.Window)
+	if err != nil {
+		log.Printf("⚠️ [FlapGuard:%s] Invalid Window '%s', defaulting to 1s", iface.Name, fg.cfg.Window)
+		winDur = 1 * time.Second
+	}
+	
+	// Parseo de Cooldown Global
+	coolDur, err := time.ParseDuration(fg.cfg.AlertCooldown)
+	if err != nil {
+		log.Printf("⚠️ [FlapGuard:%s] Invalid AlertCooldown '%s', defaulting to 30s", iface.Name, fg.cfg.AlertCooldown)
+		coolDur = 30 * time.Second
+	}
 
-	// 2. Override
+	// 2. Overrides
 	if override, ok := fg.cfg.Overrides[iface.Name]; ok {
 		if override.Threshold > 0 {
 			fg.threshold = uint16(override.Threshold)
-			log.Printf("🔧 [FlapGuard] Override applied for %s: Threshold = %d", iface.Name, fg.threshold)
+			log.Printf("🔧 [FlapGuard:%s] Override Threshold = %d", iface.Name, fg.threshold)
+		}
+		// Override de Window si existe
+		if override.Window != "" {
+			ovWin, err := time.ParseDuration(override.Window)
+			if err == nil {
+				winDur = ovWin
+				log.Printf("🔧 [FlapGuard:%s] Override Window = %v", iface.Name, ovWin)
+			} else {
+				log.Printf("⚠️ [FlapGuard:%s] Invalid Override Window '%s', ignoring", iface.Name, override.Window)
+			}
 		}
 	}
 
+	// 3. Fallbacks y Conversión a Nanosegundos (Metal Optimization)
+	if fg.threshold == 0 { fg.threshold = 5 }
+	if winDur == 0 { winDur = 1 * time.Second }
+	if coolDur == 0 { coolDur = 30 * time.Second }
+
+	fg.windowNano = winDur.Nanoseconds()
+	fg.cooldownNano = coolDur.Nanoseconds()
+
+	log.Printf("✅ [FlapGuard:%s] Active. Threshold: %d moves / %v", iface.Name, fg.threshold, winDur)
+
+	// Goroutine de limpieza de memoria
 	go func() {
 		ticker := time.NewTicker(30 * time.Second)
 		defer ticker.Stop()
@@ -69,14 +104,17 @@ func (fg *FlapGuard) Start(conn *packet.Conn, iface *net.Interface) error {
 		for range ticker.C {
 			fg.mu.Lock()
 			now := time.Now().UnixNano()
-			expiry := int64(60 * time.Second)
+			expiry := int64(60 * time.Second) // Limpieza agresiva si está lleno
 
 			if len(fg.registry) > MaxFlapEntries {
 				expiry = int64(10 * time.Second)
 			}
+			
+			// Convertir a nanosegundos para la comparación
+			expiryNano := expiry
 
 			for mac, entry := range fg.registry {
-				if now-entry.lastSeen > expiry {
+				if now-entry.lastSeen > expiryNano {
 					delete(fg.registry, mac)
 				}
 			}
@@ -87,19 +125,19 @@ func (fg *FlapGuard) Start(conn *packet.Conn, iface *net.Interface) error {
 }
 
 func (fg *FlapGuard) OnPacket(data []byte, length int, vlanID uint16) {
-	if length < 12 {
-		return
-	}
+	if length < 12 { return }
 
 	var srcMac [6]byte
 	copy(srcMac[:], data[6:12])
 
+	// Hot Path: UnixNano es mucho más rápido que instanciar objetos time.Time
 	now := time.Now().UnixNano()
 
 	fg.mu.Lock()
 	entry, exists := fg.registry[srcMac]
 
 	if !exists {
+		// Protección OOM
 		if len(fg.registry) >= MaxFlapEntries {
 			fg.mu.Unlock()
 			return
@@ -114,7 +152,8 @@ func (fg *FlapGuard) OnPacket(data []byte, length int, vlanID uint16) {
 	}
 
 	if entry.lastVLAN != vlanID {
-		if (now - entry.lastSeen) < FlapWindowNano {
+		// USAR VARIABLE DE INSTANCIA (Calculada en Start)
+		if (now - entry.lastSeen) < fg.windowNano {
 			entry.flapCount++
 		} else {
 			entry.flapCount = 1
@@ -123,20 +162,17 @@ func (fg *FlapGuard) OnPacket(data []byte, length int, vlanID uint16) {
 		entry.lastVLAN = vlanID
 		entry.lastSeen = now
 
-		// USAMOS fg.threshold (LOCAL)
 		if entry.flapCount >= fg.threshold {
-			if (now - entry.lastAlert) > FlapCooldownNano {
+			// USAR VARIABLE DE INSTANCIA
+			if (now - entry.lastAlert) > fg.cooldownNano {
 				entry.lastAlert = now
 
-				// TELEMETRY HIT
 				telemetry.EngineHits.WithLabelValues(fg.ifaceName, "FlapGuard", "MacFlapping").Inc()
 
 				fg.registry[srcMac] = entry
 				fg.mu.Unlock()
 
-				// CAPTURE VARIABLE FOR SAFETY
 				currentIface := fg.ifaceName
-
 				go fg.sendAlert(currentIface, srcMac, entry.flapCount, vlanID)
 				return
 			}
@@ -144,7 +180,8 @@ func (fg *FlapGuard) OnPacket(data []byte, length int, vlanID uint16) {
 
 		fg.registry[srcMac] = entry
 	} else {
-		if (now - entry.lastSeen) > int64(time.Second) {
+		// Update de mantenimiento (keep-alive)
+		if (now - entry.lastSeen) > 1_000_000_000 { // > 1s
 			entry.lastSeen = now
 			fg.registry[srcMac] = entry
 		}
@@ -153,7 +190,6 @@ func (fg *FlapGuard) OnPacket(data []byte, length int, vlanID uint16) {
 	fg.mu.Unlock()
 }
 
-// sendAlert explicitly accepts ifaceName string to ensure thread safety
 func (fg *FlapGuard) sendAlert(iface string, mac [6]byte, count uint16, vlanID uint16) {
 	macSlice := mac[:]
 	info := utils.ClassifyMAC(macSlice)
@@ -173,9 +209,9 @@ func (fg *FlapGuard) sendAlert(iface string, mac [6]byte, count uint16, vlanID u
 		"    INTERFACE: %s\n"+
 		"    IDENTITY:  %s\n"+
 		"    MAC:       %s\n"+
-		"    MOVES:     %d times/sec (Current VLAN: %d)\n"+
+		"    MOVES:     %d times in %s (Current VLAN: %d)\n"+
 		"    ANALYSIS:  Device is jumping between VLANs. Possible cabling loop or leaking configuration.",
-		severity, iface, identity, macStr, count, vlanID)
+		severity, iface, identity, macStr, count, time.Duration(fg.windowNano), vlanID)
 
 	fg.notify.Alert(msg)
 }

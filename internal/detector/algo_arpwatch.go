@@ -15,13 +15,10 @@ import (
 )
 
 const (
-	EtherTypeARP     = 0x0806
-	EtherTypeIPv6    = 0x86DD
-	OpCodeRequest    = 1
-	ArpAlertCooldown = 30 * time.Second
+	EtherTypeARP         = 0x0806
+	EtherTypeIPv6        = 0x86DD
+	OpCodeRequest        = 1
 	MaxTrackedArpSources = 5000
-	ScanThresholdIPs = 10
-	MinScanPPS       = 20
 )
 
 type arpStats struct {
@@ -37,8 +34,11 @@ type ArpWatchdog struct {
 	ifaceName string // Identidad de la interfaz
 	mu        sync.Mutex
 
-	// Configuración Efectiva
-	limitPPS uint64
+	// --- Configuración Efectiva (Cargada en Start) ---
+	limitPPS      uint64
+	scanThreshold int
+	scanLimitPPS  uint64
+	cooldown      time.Duration
 
 	sources       map[[6]byte]*arpStats
 	alertRegistry map[[6]byte]time.Time
@@ -57,16 +57,45 @@ func NewArpWatchdog(cfg *config.ArpWatchConfig, n *notifier.Notifier, ifaceName 
 func (aw *ArpWatchdog) Name() string { return "ArpWatchdog" }
 
 func (aw *ArpWatchdog) Start(conn *packet.Conn, iface *net.Interface) error {
-	// 1. Cargar Base
+	// 1. Cargar Defaults Globales
 	aw.limitPPS = aw.cfg.MaxPPS
+	aw.scanThreshold = aw.cfg.ScanIPThreshold
+	aw.scanLimitPPS = aw.cfg.ScanModePPS
 
-	// 2. Override
+	// Parseo de Cooldown Global
+	dur, err := time.ParseDuration(aw.cfg.AlertCooldown)
+	if err != nil {
+		log.Printf("⚠️ [ArpWatch:%s] Invalid AlertCooldown '%s', defaulting to 30s", iface.Name, aw.cfg.AlertCooldown)
+		aw.cooldown = 30 * time.Second
+	} else {
+		aw.cooldown = dur
+	}
+
+	// 2. Aplicar Overrides
 	if override, ok := aw.cfg.Overrides[iface.Name]; ok {
 		if override.MaxPPS > 0 {
 			aw.limitPPS = override.MaxPPS
-			log.Printf("🔧 [ArpWatch] Override applied for %s: MaxPPS = %d", iface.Name, aw.limitPPS)
+			log.Printf("🔧 [ArpWatch:%s] Override MaxPPS = %d", iface.Name, aw.limitPPS)
 		}
+		if override.ScanIPThreshold > 0 {
+			aw.scanThreshold = override.ScanIPThreshold
+			log.Printf("🔧 [ArpWatch:%s] Override ScanIPThreshold = %d", iface.Name, aw.scanThreshold)
+		}
+		if override.ScanModePPS > 0 {
+			aw.scanLimitPPS = override.ScanModePPS
+			log.Printf("🔧 [ArpWatch:%s] Override ScanModePPS = %d", iface.Name, aw.scanLimitPPS)
+		}
+		// Nota: ArpWatchOverride no tiene AlertCooldown en config.go fase 1, se mantiene el global.
 	}
+
+	// 3. Fallbacks de Seguridad (Precepto #15: Zero-Value usability)
+	if aw.limitPPS == 0 { aw.limitPPS = 500 }
+	if aw.scanThreshold == 0 { aw.scanThreshold = 10 }
+	if aw.scanLimitPPS == 0 { aw.scanLimitPPS = 20 }
+	if aw.cooldown == 0 { aw.cooldown = 30 * time.Second }
+
+	log.Printf("✅ [ArpWatch:%s] Active. Limit: %d pps (Scan Mode: >%d targets -> %d pps)", 
+		iface.Name, aw.limitPPS, aw.scanThreshold, aw.scanLimitPPS)
 
 	go func() {
 		ticker := time.NewTicker(1 * time.Second)
@@ -99,23 +128,15 @@ func (aw *ArpWatchdog) OnPacket(data []byte, length int, vlanID uint16) {
 		ethTypeOffset = 16
 	}
 
-	if length < ethOffset+8 {
-		return
-	}
+	if length < ethOffset+8 { return }
 
-	if binary.BigEndian.Uint16(data[ethTypeOffset:ethTypeOffset+2]) != EtherTypeARP {
-		return
-	}
+	if binary.BigEndian.Uint16(data[ethTypeOffset:ethTypeOffset+2]) != EtherTypeARP { return }
 
 	arpBase := ethOffset
-	if length < arpBase+28 {
-		return
-	}
+	if length < arpBase+28 { return }
 
 	opCode := binary.BigEndian.Uint16(data[arpBase+6 : arpBase+8])
-	if opCode != OpCodeRequest {
-		return
-	}
+	if opCode != OpCodeRequest { return }
 
 	// ZERO-ALLOC KEY EXTRACTION
 	var srcMacKey [6]byte
@@ -128,6 +149,7 @@ func (aw *ArpWatchdog) OnPacket(data []byte, length int, vlanID uint16) {
 	stats, exists := aw.sources[srcMacKey]
 
 	if !exists {
+		// Protección de memoria
 		if len(aw.sources) > MaxTrackedArpSources {
 			aw.mu.Unlock()
 			return
@@ -147,6 +169,7 @@ func (aw *ArpWatchdog) OnPacket(data []byte, length int, vlanID uint16) {
 	if targetIP > stats.maxIP {
 		stats.maxIP = targetIP
 	}
+	// Límite hardcodeado de 255 targets para no explotar memoria en un scan masivo /16
 	if len(stats.targets) < 255 {
 		stats.targets[targetIP] = struct{}{}
 	}
@@ -158,22 +181,26 @@ func (aw *ArpWatchdog) analyzeAndReset() {
 	aw.mu.Lock()
 	defer aw.mu.Unlock()
 
-	// CAPTURE VARIABLE FOR SAFETY (Though inside lock, it's safer for the goroutine call)
 	currentIface := aw.ifaceName
 
 	for macArray, stats := range aw.sources {
 		uniqueTargets := len(stats.targets)
-		isScanning := uniqueTargets > ScanThresholdIPs
+		
+		// USAR VARIABLE DE INSTANCIA
+		isScanning := uniqueTargets > aw.scanThreshold
 
 		threshold := aw.limitPPS
 		
 		if isScanning {
-			threshold = MinScanPPS
+			// USAR VARIABLE DE INSTANCIA
+			threshold = aw.scanLimitPPS
 		}
 
 		if stats.pps > threshold {
 			lastAlert, alerted := aw.alertRegistry[macArray]
-			if !alerted || time.Since(lastAlert) > ArpAlertCooldown {
+			
+			// USAR VARIABLE DE INSTANCIA (Cooldown)
+			if !alerted || time.Since(lastAlert) > aw.cooldown {
 				var pattern, details, metricType string
 
 				if isScanning {
@@ -214,12 +241,14 @@ func (aw *ArpWatchdog) analyzeAndReset() {
 		}
 
 		if len(aw.alertRegistry) > MaxTrackedArpSources {
+			// Limpieza de memoria simple
 			for k, t := range aw.alertRegistry {
-				if time.Since(t) > ArpAlertCooldown*2 {
+				if time.Since(t) > aw.cooldown*2 {
 					delete(aw.alertRegistry, k)
 				}
 			}
 		}
 	}
+	// Precepto #12: Mapas como caches -> Re-make para evitar fuga de memoria en long-running
 	aw.sources = make(map[[6]byte]*arpStats, 100)
 }

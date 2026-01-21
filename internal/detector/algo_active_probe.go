@@ -70,6 +70,7 @@ func (ap *ActiveProbe) Start(conn *packet.Conn, iface *net.Interface) error {
 	binary.BigEndian.PutUint16(typeBytes, ap.ethertype)
 
 	// --- GENERACIÓN DE PAYLOAD CON IDENTIDAD ---
+	// Formato: "MAGIC_STRING|nombre_interfaz"
 	fullPayload := fmt.Sprintf("%s|%s", ap.cfg.MagicPayload, ap.ifaceName)
 	payloadBytes := []byte(fullPayload)
 
@@ -81,7 +82,7 @@ func (ap *ActiveProbe) Start(conn *packet.Conn, iface *net.Interface) error {
 
 	ap.probeFrame = frame
 
-	log.Printf("[%s] ActiveProbe Initialized. Frequency: %dms", ap.ifaceName, ap.intervalMs)
+	log.Printf("✅ [ActiveProbe:%s] Active. Freq: %dms, EtherType: 0x%X", ap.ifaceName, ap.intervalMs, ap.ethertype)
 
 	// 2. Usar Intervalo Efectivo en el Ticker
 	go func() {
@@ -108,68 +109,86 @@ func (ap *ActiveProbe) OnPacket(data []byte, length int, vlanID uint16) {
 		return
 	}
 
-	srcMac := data[6:12]
+	// -------------------------------------------------------------------------
+	// OPTIMIZACIÓN CRÍTICA (Precepto #3): Chequeo rápido de EtherType primero.
+	// -------------------------------------------------------------------------
+	etherType := binary.BigEndian.Uint16(data[etherTypeOffset : etherTypeOffset+2])
+	
+	// Si no es el protocolo de sonda (ej: 0xFFFF), salimos inmediatamente.
+	// Esto descarta el 99.9% del tráfico antes de hacer allocs o comparaciones caras.
+	if etherType != ap.ethertype {
+		return
+	}
 
-	if bytes.Equal(srcMac, ap.myMAC) {
-		etherType := binary.BigEndian.Uint16(data[etherTypeOffset : etherTypeOffset+2])
+	// -------------------------------------------------------------------------
+	// CORRECCIÓN DE BUG: Eliminado "if bytes.Equal(srcMac, ap.myMAC)"
+	// Ahora procesamos cualquier paquete con nuestro EtherType, venga de quien venga.
+	// -------------------------------------------------------------------------
 
-		// Usamos variable local ap.ethertype
-		if etherType == ap.ethertype {
-			payload := data[headerSize:length]
+	payload := data[headerSize:length]
+	
+	// Construimos el prefijo mágico esperado (ej: "LOOPWARDEN_PROBE|")
+	// Nota: Esto crea un slice pequeño, aceptable en este punto porque ya pasamos el filtro de EtherType.
+	magic := []byte(ap.cfg.MagicPayload + "|")
+	
+	if bytes.Contains(payload, magic) {
+		ap.mu.Lock()
+		defer ap.mu.Unlock()
+		
+		now := time.Now()
+		if now.Sub(ap.lastAlert) > ProbeAlertCooldown {
 			
-			magic := []byte(ap.cfg.MagicPayload + "|")
+			// Extracción robusta del nombre de la interfaz remota
+			idx := bytes.Index(payload, magic)
+			if idx == -1 { return } // Should not happen due to Contains check
+
+			startSuffix := idx + len(magic)
+			suffixBytes := payload[startSuffix:]
 			
-			if bytes.Contains(payload, magic) {
-				ap.mu.Lock()
-				defer ap.mu.Unlock()
-				
-				now := time.Now()
-				if now.Sub(ap.lastAlert) > ProbeAlertCooldown {
-					
-					idx := bytes.Index(payload, magic)
-					if idx == -1 { return }
-
-					startSuffix := idx + len(magic)
-					suffixBytes := payload[startSuffix:]
-					nullIdx := bytes.IndexByte(suffixBytes, 0)
-					if nullIdx != -1 {
-						suffixBytes = suffixBytes[:nullIdx]
-					}
-					remoteIface := string(suffixBytes)
-
-					var alertMsg string
-					var alertType string
-
-					if remoteIface == ap.ifaceName {
-						alertType = "HardLoop"
-						alertMsg = fmt.Sprintf("[%s] 🚨 LOOP CONFIRMED! (Self-Loop)\n"+
-							"    INTERFACE: %s\n"+
-							"    STATUS:    Cable connects interface back to itself.\n"+
-							"    ACTION:    IMMEDIATE DISCONNECT.", ap.ifaceName, ap.ifaceName)
-					} else {
-						alertType = "CrossDomainLoop"
-						alertMsg = fmt.Sprintf("[%s] ☣️ CRITICAL TOPOLOGY ERROR (Cross-Domain)!\n"+
-							"    INTERFACE: %s\n"+
-							"    DETECTED:  Physical bridge between two different networks.\n"+
-							"    PATH:      [Remote: %s]  ===>  [Local: %s]\n"+
-							"    ACTION:    Check cabling between these two segments immediately.", 
-							ap.ifaceName, ap.ifaceName, remoteIface, ap.ifaceName)
-					}
-
-					telemetry.EngineHits.WithLabelValues(ap.ifaceName, "ActiveProbe", alertType).Inc()
-					
-					dstMac := data[0:6]
-					retInfo := utils.ClassifyMAC(dstMac)
-					
-					fullMsg := fmt.Sprintf("%s\n    RETURN PATH: %s", alertMsg, retInfo.Description)
-					
-					// ActiveProbe constructs message in sync path (under lock) for safety, 
-					// but dispatch is async in notifier.
-					go ap.notify.Alert(fullMsg)
-
-					ap.lastAlert = now
-				}
+			// Limpieza de padding nulo (zero-byte termination) si el driver añade padding ethernet
+			nullIdx := bytes.IndexByte(suffixBytes, 0)
+			if nullIdx != -1 {
+				suffixBytes = suffixBytes[:nullIdx]
 			}
+			remoteIface := string(suffixBytes)
+
+			var alertMsg string
+			var alertType string
+
+			// --- LÓGICA DE DETECCIÓN DE TOPOLOGÍA ---
+			if remoteIface == ap.ifaceName {
+				// CASO A: SELF-LOOP (Hard Loop)
+				// La sonda salió de mí y volvió a mí.
+				alertType = "HardLoop"
+				alertMsg = fmt.Sprintf("[%s] 🚨 LOOP CONFIRMED! (Self-Loop)\n"+
+					"    INTERFACE: %s\n"+
+					"    STATUS:    Cable connects interface back to itself.\n"+
+					"    ACTION:    IMMEDIATE DISCONNECT.", ap.ifaceName, ap.ifaceName)
+			} else {
+				// CASO B: CROSS-DOMAIN LOOP
+				// La sonda salió de OTRA interfaz (ej: ens18) y llegó a mí (ens19).
+				alertType = "CrossDomainLoop"
+				alertMsg = fmt.Sprintf("[%s] ☣️ CRITICAL TOPOLOGY ERROR (Cross-Domain)!\n"+
+					"    INTERFACE: %s\n"+
+					"    DETECTED:  Physical bridge between two different networks.\n"+
+					"    PATH:      [Remote: %s]  ===>  [Local: %s]\n"+
+					"    ACTION:    Check cabling between these two segments immediately.", 
+					ap.ifaceName, ap.ifaceName, remoteIface, ap.ifaceName)
+			}
+
+			telemetry.EngineHits.WithLabelValues(ap.ifaceName, "ActiveProbe", alertType).Inc()
+			
+			dstMac := data[0:6] // Destination MAC (Broadcast FF:FF...)
+			srcMac := data[6:12] // Source MAC (Quien generó la sonda)
+			
+			retInfo := utils.ClassifyMAC(dstMac)
+			
+			fullMsg := fmt.Sprintf("%s\n    SOURCE MAC: %s\n    DEST TYPE:  %s", 
+				alertMsg, net.HardwareAddr(srcMac).String(), retInfo.Description)
+			
+			go ap.notify.Alert(fullMsg)
+
+			ap.lastAlert = now
 		}
 	}
 }
