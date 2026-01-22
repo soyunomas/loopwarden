@@ -10,8 +10,7 @@ sensor_name = "LoopWarden-Core-Stack"
 log_file = "loopwarden.log"
 
 [network]
-# ⚠️ CAMBIO CRÍTICO: Ahora es una lista de interfaces.
-# LoopWarden levantará un motor de detección independiente para cada una.
+# LoopWarden levantará un motor de detección independiente para cada interfaz listada.
 interfaces = ["eno1", "eno2", "vlan10"] 
 
 # Longitud de captura (SnapShot Length). 2048 bytes es suficiente para cabeceras + payload.
@@ -19,6 +18,12 @@ snaplen = 2048
 
 [alerts]
 syslog_server = ""  # Ej: "192.168.1.50:514"
+
+# --- GLOBAL ALERT DAMPENING (Smart Silence) ---
+# Evita saturar el servidor de correo o Slack durante una tormenta masiva.
+[alerts.dampening]
+max_alerts_per_minute = 60  # Si se supera, se silencia el sistema.
+mute_duration = "60s"       # Tiempo de silencio tras detectar inundación de alertas.
 
 # --- Webhook (Slack/Teams/Discord) ---
 [alerts.webhook]
@@ -49,29 +54,42 @@ chat_id = ""
     history_size = 4096
     alert_threshold = 200
     storm_pps_limit = 15000
+    alert_cooldown = "5s"  # Frecuencia máxima de alertas repetidas por bucle
 
     # --- ALGORITMO 2: ActiveProbe ---
     [algorithms.active_probe]
     enabled = true
     interval_ms = 1000
     ethertype = 65535
-    magic_payload = "LOOPWARDEN_PROBE" # El sistema añadirá "|eno1" automáticamente.
-    target_mac = "" 
+    magic_payload = "LOOPWARDEN_PROBE" 
+    
+    # --- DOMAIN: Identificador de Red (CRÍTICO PARA MÚLTIPLES SENSORES) ---
+    # Define el "Nombre de la Red".
+    # - Si dos sensores comparten dominio (ej: "VLAN10"), se ignoran mutuamente (Vecinos).
+    # - Si recibes una sonda con dominio diferente, es una ALERTA de cruce de VLANs.
+    domain = "default"  
 
     # --- ALGORITMO 3: MAC Storm ---
     [algorithms.mac_storm]
     enabled = true
     max_pps_per_mac = 2000
+    max_tracked_macs = 10000  # Límite de memoria para evitar OOM
+    alert_cooldown = "30s"    # Silencio por MAC tras primera alerta
 
     # --- ALGORITMO 4: FlapGuard ---
     [algorithms.flap_guard]
     enabled = true
     threshold = 5
+    window = "1s"           # Ventana de tiempo para contar cambios de VLAN
+    alert_cooldown = "30s"  # Silencio por MAC tras detectar flapping
 
     # --- ALGORITMO 5: ArpWatchdog ---
     [algorithms.arp_watch]
     enabled = true
-    max_pps = 500
+    max_pps = 500             # Límite para tráfico normal
+    scan_ip_threshold = 10    # IPs únicas destino para considerar "Escaneo"
+    scan_mode_pps = 100       # Límite de PPS más estricto si se detecta modo escaneo
+    alert_cooldown = "30s"
 
     # --- ALGORITMO 6: DhcpHunter ---
     [algorithms.dhcp_hunter]
@@ -93,6 +111,17 @@ chat_id = ""
     [algorithms.mcast_policer]
     enabled = true
     max_pps = 8000
+
+# --- OVERRIDES: EJEMPLO DE CONFIGURACIÓN POR INTERFAZ ---
+# Aquí es donde configuras los dominios correctos para cada VLAN.
+
+    # Interfaz conectada a la VLAN 10
+    [algorithms.active_probe.overrides.eno1]
+    domain = "VLAN_10"    # Si ve otro sensor "VLAN_10", es AMIGO. Si ve "VLAN_20", es CRUCE.
+
+    # Interfaz conectada a la VLAN 20
+    [algorithms.active_probe.overrides.eno2]
+    domain = "VLAN_20"    # Debe ser distinto al de eno1 para detectar puentes entre ellos.
 
 # --- TELEMETRÍA Y OBSERVABILIDAD ---
 [telemetry]

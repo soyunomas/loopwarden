@@ -22,12 +22,13 @@ const (
 type EtherFuse struct {
 	cfg       *config.EtherFuseConfig
 	notify    *notifier.Notifier
-	ifaceName string // Identidad de la interfaz
+	ifaceName string
 	mu        sync.Mutex
 
-	// Configuración Efectiva
+	// --- Configuración Efectiva ---
 	alertThreshold int
 	stormPPSLimit  uint64
+	cooldown       time.Duration
 
 	ringBuffer  []uint64
 	lookupTable map[uint64]uint8
@@ -43,7 +44,6 @@ func NewEtherFuse(cfg *config.EtherFuseConfig, n *notifier.Notifier, ifaceName s
 		cfg:         cfg,
 		notify:      n,
 		ifaceName:   ifaceName,
-		// HistorySize es estático
 		ringBuffer:  make([]uint64, cfg.HistorySize),
 		lookupTable: make(map[uint64]uint8, cfg.HistorySize),
 		writeCursor: 0,
@@ -54,9 +54,17 @@ func NewEtherFuse(cfg *config.EtherFuseConfig, n *notifier.Notifier, ifaceName s
 func (ef *EtherFuse) Name() string { return "EtherFuse" }
 
 func (ef *EtherFuse) Start(conn *packet.Conn, iface *net.Interface) error {
-	// 1. Base
+	// 1. Base Global
 	ef.alertThreshold = ef.cfg.AlertThreshold
 	ef.stormPPSLimit = ef.cfg.StormPPSLimit
+	
+	dur, err := time.ParseDuration(ef.cfg.AlertCooldown)
+	if err != nil {
+		log.Printf("⚠️ [EtherFuse:%s] Invalid AlertCooldown '%s', defaulting to 5s", iface.Name, ef.cfg.AlertCooldown)
+		ef.cooldown = 5 * time.Second
+	} else {
+		ef.cooldown = dur
+	}
 
 	// 2. Override
 	if override, ok := ef.cfg.Overrides[iface.Name]; ok {
@@ -66,9 +74,13 @@ func (ef *EtherFuse) Start(conn *packet.Conn, iface *net.Interface) error {
 		if override.StormPPSLimit > 0 {
 			ef.stormPPSLimit = override.StormPPSLimit
 		}
-		log.Printf("🔧 [EtherFuse] Override applied for %s: Threshold=%d, StormLimit=%d",
+		log.Printf("🔧 [EtherFuse:%s] Override Threshold=%d, StormLimit=%d",
 			iface.Name, ef.alertThreshold, ef.stormPPSLimit)
 	}
+	
+	// 3. Fallback
+	if ef.cooldown == 0 { ef.cooldown = 5 * time.Second }
+	
 	return nil
 }
 
@@ -92,10 +104,9 @@ func (ef *EtherFuse) OnPacket(data []byte, length int, vlanID uint16) {
 	if ef.packetsSec&0x3FF == 0 {
 		now := time.Now()
 		if now.Sub(ef.lastReset) >= time.Second {
-			// USAR VARIABLE LOCAL stormPPSLimit
 			if ef.packetsSec > ef.stormPPSLimit {
-				if now.Sub(ef.lastAlertTime) > 5*time.Second {
-					// UPDATED: Added ef.ifaceName label
+				// Usamos variable configurada
+				if now.Sub(ef.lastAlertTime) > ef.cooldown {
 					telemetry.EngineHits.WithLabelValues(ef.ifaceName, "EtherFuse", "GlobalStorm").Inc()
 
 					loc := "Native"
@@ -103,8 +114,6 @@ func (ef *EtherFuse) OnPacket(data []byte, length int, vlanID uint16) {
 						loc = fmt.Sprintf("%d", vlanID)
 					}
 					pps := ef.packetsSec
-					
-					// CAPTURE VARIABLE FOR SAFETY
 					currentIface := ef.ifaceName
 
 					go func(iface string, l string, p uint64) {
@@ -129,9 +138,9 @@ func (ef *EtherFuse) OnPacket(data []byte, length int, vlanID uint16) {
 		ef.lookupTable[sum] = newCount
 
 		if int(newCount) > ef.alertThreshold {
-			if time.Since(ef.lastAlertTime) > 5*time.Second {
+			// Usamos variable configurada
+			if time.Since(ef.lastAlertTime) > ef.cooldown {
 
-				// UPDATED: Added ef.ifaceName label
 				telemetry.EngineHits.WithLabelValues(ef.ifaceName, "EtherFuse", "LoopDetected").Inc()
 
 				var dstMacBytes, srcMacBytes []byte
@@ -147,7 +156,6 @@ func (ef *EtherFuse) OnPacket(data []byte, length int, vlanID uint16) {
 					vlanStr = fmt.Sprintf("%d", vlanID)
 				}
 				
-				// CAPTURE VARIABLE FOR SAFETY
 				currentIface := ef.ifaceName
 
 				go func(iface string, v string, sMac, dMac []byte, h uint64, reps uint8) {

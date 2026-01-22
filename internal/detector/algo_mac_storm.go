@@ -14,18 +14,15 @@ import (
 	"github.com/soyunomas/loopwarden/internal/utils"
 )
 
-const (
-	MaxTrackedMacs   = 10000
-	MacAlertCooldown = 30 * time.Second
-)
-
 type MacStorm struct {
 	cfg       *config.MacStormConfig
 	notify    *notifier.Notifier
-	ifaceName string // Identidad de la interfaz
+	ifaceName string
 
-	// Configuración Efectiva (Local Copy para Hot Path)
-	limitPPS uint64
+	// --- Configuración Efectiva ---
+	limitPPS   uint64
+	maxTracked int
+	cooldown   time.Duration
 
 	mu         sync.Mutex
 	counters   map[[6]byte]uint64
@@ -45,16 +42,33 @@ func NewMacStorm(cfg *config.MacStormConfig, n *notifier.Notifier, ifaceName str
 func (ms *MacStorm) Name() string { return "MacStorm" }
 
 func (ms *MacStorm) Start(conn *packet.Conn, iface *net.Interface) error {
-	// 1. Cargar valor base Global
+	// 1. Defaults Globales
 	ms.limitPPS = ms.cfg.MaxPPSPerMac
+	ms.maxTracked = ms.cfg.MaxTrackedMacs
+	
+	dur, err := time.ParseDuration(ms.cfg.AlertCooldown)
+	if err != nil {
+		log.Printf("⚠️ [MacStorm:%s] Invalid AlertCooldown '%s', defaulting to 30s", iface.Name, ms.cfg.AlertCooldown)
+		ms.cooldown = 30 * time.Second
+	} else {
+		ms.cooldown = dur
+	}
 
-	// 2. Aplicar Override si existe y es > 0
+	// 2. Overrides
 	if override, ok := ms.cfg.Overrides[iface.Name]; ok {
 		if override.MaxPPSPerMac > 0 {
 			ms.limitPPS = override.MaxPPSPerMac
-			log.Printf("🔧 [MacStorm] Override applied for %s: MaxPPS = %d", iface.Name, ms.limitPPS)
+			log.Printf("🔧 [MacStorm:%s] Override MaxPPS = %d", iface.Name, ms.limitPPS)
 		}
 	}
+
+	// 3. Fallbacks de Seguridad
+	if ms.limitPPS == 0 { ms.limitPPS = 2000 }
+	if ms.maxTracked == 0 { ms.maxTracked = 10000 }
+	if ms.cooldown == 0 { ms.cooldown = 30 * time.Second }
+
+	log.Printf("✅ [MacStorm:%s] Active. Limit: %d pps, MemLimit: %d hosts, Cooldown: %v", 
+		iface.Name, ms.limitPPS, ms.maxTracked, ms.cooldown)
 
 	go func() {
 		rateTicker := time.NewTicker(1 * time.Second)
@@ -66,15 +80,16 @@ func (ms *MacStorm) Start(conn *packet.Conn, iface *net.Interface) error {
 			select {
 			case <-rateTicker.C:
 				ms.mu.Lock()
-				// Precepto #12: Re-make map para evitar memory leak en long-running
+				// Precepto #12: Map reset
 				ms.counters = make(map[[6]byte]uint64, 1000)
 				ms.mu.Unlock()
 
 			case <-cleanupTicker.C:
 				ms.mu.Lock()
 				now := time.Now()
+				expiry := ms.cooldown * 2
 				for mac, lastAlert := range ms.alertState {
-					if now.Sub(lastAlert) > MacAlertCooldown*2 {
+					if now.Sub(lastAlert) > expiry {
 						delete(ms.alertState, mac)
 					}
 				}
@@ -86,9 +101,7 @@ func (ms *MacStorm) Start(conn *packet.Conn, iface *net.Interface) error {
 }
 
 func (ms *MacStorm) OnPacket(data []byte, length int, vlanID uint16) {
-	if length < 14 {
-		return
-	}
+	if length < 14 { return }
 
 	var srcMac [6]byte
 	copy(srcMac[:], data[6:12])
@@ -97,8 +110,8 @@ func (ms *MacStorm) OnPacket(data []byte, length int, vlanID uint16) {
 
 	count, exists := ms.counters[srcMac]
 	if !exists {
-		// Precepto #10: Protección OOM
-		if len(ms.counters) >= MaxTrackedMacs {
+		// Precepto #10: Protección OOM usando variable configurada
+		if len(ms.counters) >= ms.maxTracked {
 			ms.mu.Unlock()
 			return
 		}
@@ -107,24 +120,21 @@ func (ms *MacStorm) OnPacket(data []byte, length int, vlanID uint16) {
 	newCount := count + 1
 	ms.counters[srcMac] = newCount
 
-	// USAMOS EL LÍMITE EFECTIVO CALCULADO EN START
 	if newCount > ms.limitPPS {
 		lastAlert, hasAlerted := ms.alertState[srcMac]
-		if !hasAlerted || time.Since(lastAlert) > MacAlertCooldown {
+		
+		// Usamos ms.cooldown configurado
+		if !hasAlerted || time.Since(lastAlert) > ms.cooldown {
 
-			// TELEMETRY HIT
 			telemetry.EngineHits.WithLabelValues(ms.ifaceName, "MacStorm", "HostFlood").Inc()
 
 			ms.alertState[srcMac] = time.Now()
 			ms.mu.Unlock()
 
-			// --- CAPTURA DE DESTINO PARA FORENSE ---
 			var dstMacSample [6]byte
 			copy(dstMacSample[:], data[0:6])
 
-			// CAPTURE VARIABLE FOR SAFETY
 			currentIface := ms.ifaceName
-
 			go ms.sendAlert(currentIface, srcMac, dstMacSample, newCount, vlanID)
 			return
 		}
@@ -133,16 +143,13 @@ func (ms *MacStorm) OnPacket(data []byte, length int, vlanID uint16) {
 	ms.mu.Unlock()
 }
 
-// sendAlert now accepts 'ifaceName' explicitly to avoid closure capture issues
 func (ms *MacStorm) sendAlert(iface string, srcMac [6]byte, dstSample [6]byte, count uint64, vlanID uint16) {
 	location := "Native VLAN"
 	if vlanID != 0 {
 		location = fmt.Sprintf("VLAN %d", vlanID)
 	}
 
-	// Clasificar el destino para saber QUÉ están inundando
 	targetInfo := utils.ClassifyMAC(dstSample[:])
-
 	floodType := "Unicast Flood"
 	if targetInfo.Name != "Unicast" {
 		floodType = fmt.Sprintf("%s (%s)", targetInfo.Name, targetInfo.Description)

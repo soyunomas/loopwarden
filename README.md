@@ -12,17 +12,19 @@
 LoopWarden ejecuta **9 motores de detección concurrentes**. Cada uno busca una "firma" específica de fallo o amenaza en la red, proporcionando una visibilidad completa de Capa 2:
 
 ### 1. ActiveProbe (Inyección Activa Determinista) ⚡
-*El "Sonar" de la red. La única forma de tener 100% de certeza.*
+*El "Sonar" de la red. La única forma de tener certeza.*
 
-*   **🔬 Mecánica:** LoopWarden genera e inyecta una trama Ethernet unicast especialmente diseñada (con un EtherType `0xFFFF` configurable y un payload "mágico" **firmado con la identidad de la interfaz**) cada segundo.
-*   **🛡️ Lógica de Detección:**
-    *   **Auto-Bucle:** Si la firma enviada por `eno1` regresa a `eno1`, existe un bucle físico cerrado local.
-    *   **Bucle Cruzado:** Si la firma enviada por `eno1` aparece en `eno2`, existe un puente físico crítico entre dos dominios de red separados.
-*   **💡 Valor Diferencial:** A diferencia de los métodos pasivos que "deducen" un bucle por volumen de tráfico, ActiveProbe lo **confirma físicamente**. Es inmune a falsos positivos causados por tráfico legítimo de alta carga.
+*   **🔬 Mecánica:** LoopWarden genera e inyecta una trama Ethernet unicast (Broadcast `FF:FF...`) con un EtherType `0xFFFF` configurable. El payload contiene una firma mágica, la identidad de la interfaz y un **Dominio de Red** (Domain ID).
+*   **🛡️ Lógica de Detección (Topology Awareness):**
+    *   **Auto-Bucle (Hard Loop):** Si la sonda regresa con la **misma MAC de origen**, es un bucle físico en el propio puerto. (Alerta Crítica).
+    *   **Vecino Legítimo:** Si la sonda viene de otra MAC pero tiene el **mismo Dominio** (ej: ambos son "VLAN10"), se considera otro sensor LoopWarden conviviendo en la misma red. (Silencio).
+    *   **Bucle Cruzado (Cross-Domain):** Si la sonda viene de otra MAC con un **Dominio Diferente** (ej: recibo "VLAN10" en mi interfaz "VLAN20"), existe un puente físico crítico entre dos redes aisladas. (Alerta Crítica).
+*   **💡 Valor Diferencial:** A diferencia de los métodos pasivos, ActiveProbe no genera falsos positivos en entornos con múltiples sensores. Permite monitorizar la misma VLAN desde distintos puntos sin que los sensores se "ataquen" entre sí.
 *   **🎯 Qué detecta:**
-    *   ✅ **Bucles Físicos (Hard Loops):** Cable de parcheo conectado por error (boca a boca).
-    *   ✅ **Bucles Cruzados (Cross-Domain):** Conexión física accidental entre dos redes o VLANs distintas monitorizadas por el mismo servidor.
+    *   ✅ **Bucles Físicos:** Cable de parcheo conectado boca a boca.
+    *   ✅ **Fugas de VLAN (VLAN Leaking):** Cables cruzados entre armarios de distintos departamentos.
     *   ✅ **Fallos de STP:** Switches donde Spanning Tree ha fallado o tarda en converger.
+
 
 ### 2. EtherFuse (Análisis Pasivo de Payload) 🧬
 *Detección de "rebotes" mediante huella digital criptográfica.*
@@ -131,23 +133,23 @@ curl http://localhost:9090/metrics
 
 ---
 
-### 🔔 Notificaciones Inteligentes (Smart Silence)
+### 🔔 Notificaciones Inteligentes (Smart Silence & Dampening)
 
-En una tormenta de broadcast, una red puede generar millones de eventos por segundo. Un sistema de alertas ingenuo tumbaría tu servidor de correo o bloquearía tu API de Slack. LoopWarden implementa **Higiene Operacional**:
+En una tormenta de broadcast, una red puede generar millones de eventos por segundo. Un sistema de alertas ingenuo tumbaría tu servidor de correo o bloquearía tu API de Slack. LoopWarden implementa **Higiene Operacional Configurable**:
 
-*   **Global Dampening:** Si el sistema detecta una inundación de alertas (>20 alertas/minuto), activa automáticamente un "Modo Pánico". Silencia las notificaciones durante 60 segundos y envía un único resumen consolidado.
-*   **Adaptive Hysteresis:** Cada algoritmo tiene memoria. Si *FlapGuard* detecta un host inestable, te avisa una vez y luego guarda silencio por 30 segundos sobre ese host específico, manteniendo tus canales de comunicación limpios.
+*   **Global Dampening:** Configurable en la sección `[alerts.dampening]`. Si el sistema detecta una inundación de alertas que supera el umbral definido (default: 60 alertas/minuto), activa automáticamente un "Modo Pánico". Silencia las notificaciones globales durante el tiempo estipulado (`mute_duration`, default: 60s) y envía un único resumen consolidado al finalizar.
+*   **Cooldowns Granulares:** Cada algoritmo posee tiempos de enfriamiento configurables (`alert_cooldown`). Por ejemplo, puedes configurar *ActiveProbe* para alertar cada 5 segundos, mientras obligas a *FlapGuard* a guardar silencio durante 5 minutos tras detectar un host inestable, adaptando el ruido a la criticidad del evento.
 *   **Integraciones:** Webhooks JSON (Slack, Discord, Mattermost, Google Chat, Rocket.Chat), **Telegram Bots**, Syslog (RFC 3164) y SMTP (Email).
 
 ---
 
-## ⚙️ Referencia de Configuración (`config.toml`)
+### ⚙️ Referencia de Configuración (`config.toml`)
 
 A continuación se detallan todos los parámetros disponibles en el archivo de configuración.
 
 LoopWarden utiliza un sistema de **Herencia de Configuración** para gestionar múltiples interfaces:
 1.  **Valores Globales:** Se aplican por defecto a todas las interfaces.
-2.  **Overrides (Excepciones):** Definidos por interfaz dentro de cada algoritmo. Si existen, reemplazan al valor global (para números) o se suman a él (para listas).
+2.  **Overrides (Excepciones):** Definidos por interfaz dentro de cada algoritmo. Si existen, reemplazan al valor global (para números/strings) o se suman a él (para listas).
 
 ### 🔌 Sistema y Red
 
@@ -158,6 +160,8 @@ LoopWarden utiliza un sistema de **Herencia de Configuración** para gestionar m
 | **[network]** | `interfaces` | `["eno1"]` | **Crítico.** Lista de interfaces a monitorizar simultáneamente (ej: `["eno1", "eno2"]`). Se crea un motor independiente para cada una. |
 | | `snaplen` | `2048` | Bytes a capturar por trama. |
 | **[alerts]** | `syslog_server` | `""` | Dirección `IP:Puerto` del servidor Syslog (UDP). |
+| **[alerts.dampening]**| `max_alerts_per_minute`| `60` | **Anti-Spam.** Límite de alertas globales antes de activar silencio. |
+| | `mute_duration` | `"60s"` | Tiempo de silencio en modo pánico (ej: "1m", "30s"). |
 | **[alerts.webhook]** | `enabled` | `false` | Activa/Desactiva notificaciones vía Webhook. |
 | | `url` | `""` | URL del Webhook (Slack, Discord, Teams). |
 | **[alerts.smtp]** | `enabled` | `false` | Activa el envío por correo electrónico. |
@@ -182,15 +186,24 @@ Esta tabla muestra los parámetros globales. **Nota:** La columna "Override" ind
 | | `history_size` | `4096` | ❌ No | Tamaño del buffer de memoria para hashes. Estático por alocación de RAM. |
 | | `alert_threshold` | `200` | ✅ Sí | Cantidad de veces que un paquete debe repetirse para considerar bucle. |
 | | `storm_pps_limit` | `15000` | ✅ Sí | Umbral de PPS global para considerar tormenta masiva. |
+| | `alert_cooldown` | `"5s"` | ❌ No | Tiempo mínimo entre alertas repetidas del mismo hash. |
 | **[algorithms.active_probe]**| `enabled` | `true` | No | Activa/Desactiva la inyección activa de sondas. |
 | | `interval_ms` | `1000` | ✅ Sí | Frecuencia de envío de la sonda (milisegundos). |
 | | `ethertype` | `65535` | ❌ No | Protocolo Ethernet (0xFFFF) usado. Global para interoperabilidad. |
+| | `domain` | `"default"`| ✅ Sí | **Contexto de Red.** Etiqueta para agrupar sensores amigos (ej: "VLAN10"). Distinto dominio = Alerta de cruce. |
 | **[algorithms.mac_storm]** | `enabled` | `true` | No | Activa/Desactiva el limitador de velocidad por host. |
 | | `max_pps_per_mac`| `2000` | ✅ Sí | Máximo de paquetes/segundo permitidos por una única MAC. |
+| | `max_tracked_macs`| `10000`| ❌ No | **Protección OOM.** Límite de hosts en memoria. |
+| | `alert_cooldown` | `"30s"` | ❌ No | Tiempo de silencio tras detectar inundación de una MAC. |
 | **[algorithms.flap_guard]**| `enabled` | `true` | No | Activa/Desactiva la detección de inestabilidad de VLANs. |
-| | `threshold` | `5` | ✅ Sí | Número de cambios de VLAN permitidos por segundo para una misma MAC. |
+| | `threshold` | `5` | ✅ Sí | Número de cambios de VLAN permitidos en la ventana de tiempo. |
+| | `window` | `"1s"` | ✅ Sí | Ventana de tiempo para contar cambios (ej: "500ms", "5s"). |
+| | `alert_cooldown` | `"30s"` | ❌ No | Tiempo de silencio por host inestable. |
 | **[algorithms.arp_watch]** | `enabled` | `true` | No | Activa/Desactiva la monitorización específica de ARP. |
 | | `max_pps` | `500` | ✅ Sí | Límite global de peticiones ARP (`WHO-HAS`) por segundo. |
+| | `scan_ip_threshold`| `10` | ✅ Sí | **Anti-Scan.** IPs destino únicas para considerar "Escaneo". |
+| | `scan_mode_pps` | `100` | ✅ Sí | Límite estricto de PPS si se detecta modo escaneo. |
+| | `alert_cooldown` | `"30s"` | ❌ No | Frecuencia máxima de alertas por atacante. |
 | **[algorithms.dhcp_hunter]** | `enabled` | `true` | No | Detección de servidores DHCP Rogue. |
 | | `trusted_macs` | `[]` | ✅ Append | Lista de MACs autorizadas (Se suman Global + Override). |
 | | `trusted_cidrs` | `[]` | ✅ Append | Lista de redes (CIDR) autorizadas (Se suman Global + Override). |
@@ -212,12 +225,24 @@ max_pps_per_mac = 1000  # Límite estricto por defecto (Servidores)
     [algorithms.mac_storm.overrides.wifi0]
     max_pps_per_mac = 5000
 
+# CONFIGURACIÓN CRÍTICA PARA ACTIVE PROBE EN MULTI-VLAN
+[algorithms.active_probe]
+interval_ms = 1000
+
+    # Interfaz en VLAN 10 (Servidores)
+    [algorithms.active_probe.overrides.eno1]
+    domain = "VLAN_10"   # Ignora a otros sensores "VLAN_10". Alerta si ve "VLAN_20".
+
+    # Interfaz en VLAN 20 (Usuarios)
+    [algorithms.active_probe.overrides.eno2]
+    domain = "VLAN_20"   # Debe tener distinto dominio para detectar el cruce.
+
 [algorithms.dhcp_hunter]
 trusted_macs = ["AA:BB:CC:DD:EE:FF"] # DHCP Corporativo (Global)
 
-    # Excepción para Laboratorio (eno2): Permite DHCP extra
-    [algorithms.dhcp_hunter.overrides.eno2]
-    trusted_macs = ["00:11:22:33:44:55"] # Resultado en eno2: Global + Local
+    # Excepción para Laboratorio (eno3): Permite DHCP extra
+    [algorithms.dhcp_hunter.overrides.eno3]
+    trusted_macs = ["00:11:22:33:44:55"] # Resultado en eno3: Global + Local
 ```
 
 ### 📊 Telemetría
@@ -292,12 +317,15 @@ Antes de ajustar los números, decide tu estrategia de despliegue para mantener 
 ### 🦇 FlapGuard (Baile de VLANs)
 *Detecta cambios rápidos de puerto/VLAN.*
 
-*   **`threshold` (Movimientos por Segundo)**
+*   **`threshold` (Movimientos)**
     *   **📈 CUÁNDO SUBIR (ej: 20):**
         *   **Síntoma:** Alertas sobre usuarios WiFi (Roaming) o Servidores con LACP/Bonding.
         *   **Causa:** El cliente salta de AP rápidamente o el servidor balancea la carga entre interfaces físicas.
     *   **📉 CUÁNDO BAJAR (ej: 2-3):**
         *   **Síntoma:** Entornos estáticos (Datacenter) donde un cable nunca debe moverse. Detección inmediata de errores de cableado.
+*   **`window` (Ventana de Tiempo)**
+    *   **"1s" (Default):** Estándar.
+    *   **"5s" (Larga):** Útil para detectar "flapping lento" en redes Wi-Fi complejas donde el cliente hace roaming de forma indecisa.
 
 ### 🐶 ArpWatchdog (Tormenta ARP)
 *Monitoriza peticiones de resolución de direcciones.*
@@ -307,7 +335,9 @@ Antes de ajustar los números, decide tu estrategia de despliegue para mantener 
         *   **Síntoma:** Falsos positivos a primera hora de la mañana.
         *   **Causa:** Encendido masivo de aulas/oficinas (Boot Storm).
     *   **📉 CUÁNDO BAJAR (ej: 100):**
-        *   **Síntoma:** Redes pequeñas o de seguridad crítica. Detecta escaneos de red (`nmap`) muy rápidamente.
+        *   **Síntoma:** Redes pequeñas o de seguridad crítica.
+*   **Modo Escaneo (`scan_mode_pps`)**
+    *   ArpWatchdog ahora distingue tráfico normal de un escaneo. Si un dispositivo toca más de `scan_ip_threshold` (10) IPs distintas, se le aplica un límite más estricto (`scan_mode_pps`, default 100) para detectar infecciones de malware (`nmap`, gusanos) rápidamente.
 
 ### 🦈 DhcpHunter y 📡 RaGuard (Seguridad)
 *Listas Blancas de Infraestructura.*
@@ -334,7 +364,6 @@ Antes de ajustar los números, decide tu estrategia de despliegue para mantener 
     *   **📉 CUÁNDO BAJAR (ej: 1000):**
         *   **Síntoma:** La red WiFi colapsa pero la cableada no.
         *   **Causa:** El tráfico Multicast inunda el espectro aéreo (se transmite a velocidad base). Bajar esto protege la WiFi.
-
 
 ## 🚨 Playbook de Respuesta a Incidentes
 
