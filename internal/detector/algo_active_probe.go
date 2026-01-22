@@ -27,6 +27,7 @@ type ActiveProbe struct {
 	// Configuración Efectiva
 	intervalMs int
 	ethertype  uint16
+	domain     string // NUEVO: Contexto de VLAN/Red
 	
 	probeFrame []byte
 	destAddr   *packet.Addr
@@ -53,13 +54,23 @@ func (ap *ActiveProbe) Start(conn *packet.Conn, iface *net.Interface) error {
 	// 1. Calcular Configuración Efectiva
 	ap.intervalMs = ap.cfg.IntervalMs
 	ap.ethertype = ap.cfg.Ethertype
+	ap.domain = ap.cfg.Domain
+
+	// Default fallback si no se configura dominio
+	if ap.domain == "" {
+		ap.domain = "default"
+	}
 
 	if override, ok := ap.cfg.Overrides[iface.Name]; ok {
 		if override.IntervalMs > 0 {
 			ap.intervalMs = override.IntervalMs
-			log.Printf("🔧 [ActiveProbe] Override applied for %s: Interval = %dms", iface.Name, ap.intervalMs)
+		}
+		if override.Domain != "" {
+			ap.domain = override.Domain
 		}
 	}
+	
+	log.Printf("🔧 [ActiveProbe] Config for %s: Interval=%dms, Domain='%s'", iface.Name, ap.intervalMs, ap.domain)
 
 	broadcastHW := net.HardwareAddr{0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF}
 	ap.destAddr = &packet.Addr{
@@ -69,9 +80,10 @@ func (ap *ActiveProbe) Start(conn *packet.Conn, iface *net.Interface) error {
 	typeBytes := make([]byte, 2)
 	binary.BigEndian.PutUint16(typeBytes, ap.ethertype)
 
-	// --- GENERACIÓN DE PAYLOAD CON IDENTIDAD ---
-	// Formato: "MAGIC_STRING|nombre_interfaz"
-	fullPayload := fmt.Sprintf("%s|%s", ap.cfg.MagicPayload, ap.ifaceName)
+	// --- GENERACIÓN DE PAYLOAD CON IDENTIDAD Y DOMINIO ---
+	// Formato V2: "MAGIC_STRING|nombre_interfaz|dominio"
+	// Ej: "LOOPWARDEN_PROBE|eno1|VLAN10"
+	fullPayload := fmt.Sprintf("%s|%s|%s", ap.cfg.MagicPayload, ap.ifaceName, ap.domain)
 	payloadBytes := []byte(fullPayload)
 
 	frame := make([]byte, 0, 14+len(payloadBytes))
@@ -82,7 +94,7 @@ func (ap *ActiveProbe) Start(conn *packet.Conn, iface *net.Interface) error {
 
 	ap.probeFrame = frame
 
-	log.Printf("✅ [ActiveProbe:%s] Active. Freq: %dms, EtherType: 0x%X", ap.ifaceName, ap.intervalMs, ap.ethertype)
+	log.Printf("✅ [ActiveProbe:%s] Active. EtherType: 0x%X", ap.ifaceName, ap.ethertype)
 
 	// 2. Usar Intervalo Efectivo en el Ticker
 	go func() {
@@ -110,85 +122,103 @@ func (ap *ActiveProbe) OnPacket(data []byte, length int, vlanID uint16) {
 	}
 
 	// -------------------------------------------------------------------------
-	// OPTIMIZACIÓN CRÍTICA (Precepto #3): Chequeo rápido de EtherType primero.
+	// OPTIMIZACIÓN: Chequeo rápido de EtherType primero.
 	// -------------------------------------------------------------------------
 	etherType := binary.BigEndian.Uint16(data[etherTypeOffset : etherTypeOffset+2])
 	
-	// Si no es el protocolo de sonda (ej: 0xFFFF), salimos inmediatamente.
-	// Esto descarta el 99.9% del tráfico antes de hacer allocs o comparaciones caras.
 	if etherType != ap.ethertype {
 		return
 	}
 
 	// -------------------------------------------------------------------------
-	// CORRECCIÓN DE BUG: Eliminado "if bytes.Equal(srcMac, ap.myMAC)"
-	// Ahora procesamos cualquier paquete con nuestro EtherType, venga de quien venga.
+	// LÓGICA V2: Análisis de Dominio y MAC
 	// -------------------------------------------------------------------------
 
 	payload := data[headerSize:length]
 	
-	// Construimos el prefijo mágico esperado (ej: "LOOPWARDEN_PROBE|")
-	// Nota: Esto crea un slice pequeño, aceptable en este punto porque ya pasamos el filtro de EtherType.
-	magic := []byte(ap.cfg.MagicPayload + "|")
+	// Magic check rápido
+	magicPrefix := []byte(ap.cfg.MagicPayload + "|")
+	if !bytes.Contains(payload, magicPrefix) {
+		return
+	}
 	
-	if bytes.Contains(payload, magic) {
-		ap.mu.Lock()
-		defer ap.mu.Unlock()
-		
-		now := time.Now()
-		if now.Sub(ap.lastAlert) > ProbeAlertCooldown {
-			
-			// Extracción robusta del nombre de la interfaz remota
-			idx := bytes.Index(payload, magic)
-			if idx == -1 { return } // Should not happen due to Contains check
+	ap.mu.Lock()
+	defer ap.mu.Unlock()
+	
+	now := time.Now()
+	// Si hemos alertado recientemente, salimos (Throttling)
+	if now.Sub(ap.lastAlert) <= ProbeAlertCooldown {
+		return
+	}
 
-			startSuffix := idx + len(magic)
-			suffixBytes := payload[startSuffix:]
-			
-			// Limpieza de padding nulo (zero-byte termination) si el driver añade padding ethernet
-			nullIdx := bytes.IndexByte(suffixBytes, 0)
-			if nullIdx != -1 {
-				suffixBytes = suffixBytes[:nullIdx]
-			}
-			remoteIface := string(suffixBytes)
+	// Parsear el payload completo
+	// Formato esperado: MAGIC|IFACE|DOMAIN
+	// Importante: Eliminar padding nulo (zero-bytes) que añaden algunos drivers
+	cleanedPayload := bytes.TrimRight(payload, "\x00")
+	parts := bytes.Split(cleanedPayload, []byte("|"))
 
-			var alertMsg string
-			var alertType string
+	if len(parts) < 2 {
+		return // Payload malformado
+	}
 
-			// --- LÓGICA DE DETECCIÓN DE TOPOLOGÍA ---
-			if remoteIface == ap.ifaceName {
-				// CASO A: SELF-LOOP (Hard Loop)
-				// La sonda salió de mí y volvió a mí.
-				alertType = "HardLoop"
-				alertMsg = fmt.Sprintf("[%s] 🚨 LOOP CONFIRMED! (Self-Loop)\n"+
-					"    INTERFACE: %s\n"+
-					"    STATUS:    Cable connects interface back to itself.\n"+
-					"    ACTION:    IMMEDIATE DISCONNECT.", ap.ifaceName, ap.ifaceName)
-			} else {
-				// CASO B: CROSS-DOMAIN LOOP
-				// La sonda salió de OTRA interfaz (ej: ens18) y llegó a mí (ens19).
-				alertType = "CrossDomainLoop"
-				alertMsg = fmt.Sprintf("[%s] ☣️ CRITICAL TOPOLOGY ERROR (Cross-Domain)!\n"+
-					"    INTERFACE: %s\n"+
-					"    DETECTED:  Physical bridge between two different networks.\n"+
-					"    PATH:      [Remote: %s]  ===>  [Local: %s]\n"+
-					"    ACTION:    Check cabling between these two segments immediately.", 
-					ap.ifaceName, ap.ifaceName, remoteIface, ap.ifaceName)
-			}
+	remoteIface := string(parts[1])
+	remoteDomain := "default"
+	if len(parts) >= 3 {
+		remoteDomain = string(parts[2])
+	}
 
-			telemetry.EngineHits.WithLabelValues(ap.ifaceName, "ActiveProbe", alertType).Inc()
-			
-			dstMac := data[0:6] // Destination MAC (Broadcast FF:FF...)
-			srcMac := data[6:12] // Source MAC (Quien generó la sonda)
-			
-			retInfo := utils.ClassifyMAC(dstMac)
-			
-			fullMsg := fmt.Sprintf("%s\n    SOURCE MAC: %s\n    DEST TYPE:  %s", 
-				alertMsg, net.HardwareAddr(srcMac).String(), retInfo.Description)
-			
-			go ap.notify.Alert(fullMsg)
+	// MAC de origen del paquete
+	srcMac := data[6:12]
+	
+	// --- MATRIZ DE DECISIÓN ---
+	
+	isSelfMac := bytes.Equal(srcMac, ap.myMAC)
+	isSameDomain := (remoteDomain == ap.domain)
+	
+	var alertType string
+	var alertMsg string
+	shouldAlert := false
 
-			ap.lastAlert = now
+	if isSelfMac {
+		// CASO 1: AUTO-BUCLE (Hard Loop)
+		shouldAlert = true
+		alertType = "HardLoop"
+		alertMsg = fmt.Sprintf("[%s] 🚨 LOOP CONFIRMED! (Self-Loop)\n"+
+			"    INTERFACE: %s\n"+
+			"    STATUS:    Cable connects interface back to itself.\n"+
+			"    ACTION:    IMMEDIATE DISCONNECT.", ap.ifaceName, ap.ifaceName)
+
+	} else {
+		// Viene de OTRA MAC
+		if isSameDomain {
+			// CASO 2: VECINO LEGÍTIMO
+			shouldAlert = false 
+		} else {
+			// CASO 3: CRUCE DE DOMINIOS (Cross-Domain Loop)
+			shouldAlert = true
+			alertType = "CrossDomainLoop"
+			
+			// --- CORRECCIÓN AQUÍ: Añadido ap.ifaceName dos veces ---
+			alertMsg = fmt.Sprintf("[%s] ☣️ CRITICAL TOPOLOGY ERROR (Cross-Domain)!\n"+
+				"    INTERFACE: %s (Domain: %s)\n"+
+				"    REMOTE:    %s (Domain: %s)\n"+
+				"    DETECTED:  Physical bridge between two different networks.\n"+
+				"    ACTION:    Check cabling between these two segments immediately.", 
+				ap.ifaceName, ap.ifaceName, ap.domain, remoteIface, remoteDomain)
 		}
+	}
+
+	if shouldAlert {
+		telemetry.EngineHits.WithLabelValues(ap.ifaceName, "ActiveProbe", alertType).Inc()
+		
+		dstMac := data[0:6] 
+		retInfo := utils.ClassifyMAC(dstMac)
+		
+		fullMsg := fmt.Sprintf("%s\n    SOURCE MAC: %s\n    DEST TYPE:  %s", 
+			alertMsg, net.HardwareAddr(srcMac).String(), retInfo.Description)
+		
+		go ap.notify.Alert(fullMsg)
+
+		ap.lastAlert = now
 	}
 }

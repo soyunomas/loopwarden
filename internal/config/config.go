@@ -48,7 +48,7 @@ type EtherFuseConfig struct {
 	HistorySize    int    `toml:"history_size"`
 	AlertThreshold int    `toml:"alert_threshold"`
 	StormPPSLimit  uint64 `toml:"storm_pps_limit"`
-	AlertCooldown  string `toml:"alert_cooldown"` // Nuevo: Duration string (ej: "5s")
+	AlertCooldown  string `toml:"alert_cooldown"` 
 
 	Overrides map[string]EtherFuseOverride `toml:"overrides"`
 }
@@ -63,20 +63,21 @@ type ActiveProbeConfig struct {
 	IntervalMs   int    `toml:"interval_ms"`
 	Ethertype    uint16 `toml:"ethertype"`
 	MagicPayload string `toml:"magic_payload"`
-	TargetMAC    string `toml:"target_mac"`
+	Domain       string `toml:"domain"` 
 
 	Overrides map[string]ActiveProbeOverride `toml:"overrides"`
 }
 
 type ActiveProbeOverride struct {
-	IntervalMs int `toml:"interval_ms"`
+	IntervalMs int    `toml:"interval_ms"`
+	Domain     string `toml:"domain"`
 }
 
 type MacStormConfig struct {
 	Enabled        bool   `toml:"enabled"`
 	MaxPPSPerMac   uint64 `toml:"max_pps_per_mac"`
-	MaxTrackedMacs int    `toml:"max_tracked_macs"` // Nuevo: Protección de memoria
-	AlertCooldown  string `toml:"alert_cooldown"`   // Nuevo: Duration string
+	MaxTrackedMacs int    `toml:"max_tracked_macs"` 
+	AlertCooldown  string `toml:"alert_cooldown"`   
 
 	Overrides map[string]MacStormOverride `toml:"overrides"`
 }
@@ -88,31 +89,31 @@ type MacStormOverride struct {
 type FlapGuardConfig struct {
 	Enabled       bool   `toml:"enabled"`
 	Threshold     int    `toml:"threshold"`
-	Window        string `toml:"window"`         // Nuevo: Duration string (ej: "1s")
-	AlertCooldown string `toml:"alert_cooldown"` // Nuevo: Duration string
+	Window        string `toml:"window"`         
+	AlertCooldown string `toml:"alert_cooldown"` 
 
 	Overrides map[string]FlapGuardOverride `toml:"overrides"`
 }
 
 type FlapGuardOverride struct {
 	Threshold int    `toml:"threshold"`
-	Window    string `toml:"window"` // Nuevo: Override de ventana de tiempo
+	Window    string `toml:"window"` 
 }
 
 type ArpWatchConfig struct {
 	Enabled         bool   `toml:"enabled"`
 	MaxPPS          uint64 `toml:"max_pps"`
-	ScanIPThreshold int    `toml:"scan_ip_threshold"` // Nuevo: IPs únicas para considerar Scan
-	ScanModePPS     uint64 `toml:"scan_mode_pps"`     // Nuevo: PPS límite en modo Scan
-	AlertCooldown   string `toml:"alert_cooldown"`    // Nuevo: Duration string
+	ScanIPThreshold int    `toml:"scan_ip_threshold"` 
+	ScanModePPS     uint64 `toml:"scan_mode_pps"`     
+	AlertCooldown   string `toml:"alert_cooldown"`    
 
 	Overrides map[string]ArpWatchOverride `toml:"overrides"`
 }
 
 type ArpWatchOverride struct {
 	MaxPPS          uint64 `toml:"max_pps"`
-	ScanIPThreshold int    `toml:"scan_ip_threshold"` // Nuevo
-	ScanModePPS     uint64 `toml:"scan_mode_pps"`     // Nuevo
+	ScanIPThreshold int    `toml:"scan_ip_threshold"` 
+	ScanModePPS     uint64 `toml:"scan_mode_pps"`     
 }
 
 type DhcpHunterConfig struct {
@@ -165,15 +166,15 @@ type McastPolicerOverride struct {
 
 type AlertsConfig struct {
 	SyslogServer string          `toml:"syslog_server"`
-	Dampening    DampeningConfig `toml:"dampening"` // Nuevo: Control de flujo de alertas
+	Dampening    DampeningConfig `toml:"dampening"` 
 	Webhook      WebhookConfig   `toml:"webhook"`
 	Smtp         SmtpConfig      `toml:"smtp"`
 	Telegram     TelegramConfig  `toml:"telegram"`
 }
 
 type DampeningConfig struct {
-	MaxAlertsPerMinute int    `toml:"max_alerts_per_minute"` // Nuevo
-	MuteDuration       string `toml:"mute_duration"`         // Nuevo: Duration string
+	MaxAlertsPerMinute int    `toml:"max_alerts_per_minute"` 
+	MuteDuration       string `toml:"mute_duration"`         
 }
 
 type WebhookConfig struct {

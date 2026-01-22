@@ -12,17 +12,19 @@
 LoopWarden ejecuta **9 motores de detección concurrentes**. Cada uno busca una "firma" específica de fallo o amenaza en la red, proporcionando una visibilidad completa de Capa 2:
 
 ### 1. ActiveProbe (Inyección Activa Determinista) ⚡
-*El "Sonar" de la red. La única forma de tener 100% de certeza.*
+*El "Sonar" de la red. La única forma de tener certeza.*
 
-*   **🔬 Mecánica:** LoopWarden genera e inyecta una trama Ethernet unicast especialmente diseñada (con un EtherType `0xFFFF` configurable y un payload "mágico" **firmado con la identidad de la interfaz**) cada segundo.
-*   **🛡️ Lógica de Detección:**
-    *   **Auto-Bucle:** Si la firma enviada por `eno1` regresa a `eno1`, existe un bucle físico cerrado local.
-    *   **Bucle Cruzado:** Si la firma enviada por `eno1` aparece en `eno2`, existe un puente físico crítico entre dos dominios de red separados.
-*   **💡 Valor Diferencial:** A diferencia de los métodos pasivos que "deducen" un bucle por volumen de tráfico, ActiveProbe lo **confirma físicamente**. Es inmune a falsos positivos causados por tráfico legítimo de alta carga.
+*   **🔬 Mecánica:** LoopWarden genera e inyecta una trama Ethernet unicast (Broadcast `FF:FF...`) con un EtherType `0xFFFF` configurable. El payload contiene una firma mágica, la identidad de la interfaz y un **Dominio de Red** (Domain ID).
+*   **🛡️ Lógica de Detección (Topology Awareness):**
+    *   **Auto-Bucle (Hard Loop):** Si la sonda regresa con la **misma MAC de origen**, es un bucle físico en el propio puerto. (Alerta Crítica).
+    *   **Vecino Legítimo:** Si la sonda viene de otra MAC pero tiene el **mismo Dominio** (ej: ambos son "VLAN10"), se considera otro sensor LoopWarden conviviendo en la misma red. (Silencio).
+    *   **Bucle Cruzado (Cross-Domain):** Si la sonda viene de otra MAC con un **Dominio Diferente** (ej: recibo "VLAN10" en mi interfaz "VLAN20"), existe un puente físico crítico entre dos redes aisladas. (Alerta Crítica).
+*   **💡 Valor Diferencial:** A diferencia de los métodos pasivos, ActiveProbe no genera falsos positivos en entornos con múltiples sensores. Permite monitorizar la misma VLAN desde distintos puntos sin que los sensores se "ataquen" entre sí.
 *   **🎯 Qué detecta:**
-    *   ✅ **Bucles Físicos (Hard Loops):** Cable de parcheo conectado por error (boca a boca).
-    *   ✅ **Bucles Cruzados (Cross-Domain):** Conexión física accidental entre dos redes o VLANs distintas monitorizadas por el mismo servidor.
+    *   ✅ **Bucles Físicos:** Cable de parcheo conectado boca a boca.
+    *   ✅ **Fugas de VLAN (VLAN Leaking):** Cables cruzados entre armarios de distintos departamentos.
     *   ✅ **Fallos de STP:** Switches donde Spanning Tree ha fallado o tarda en converger.
+
 
 ### 2. EtherFuse (Análisis Pasivo de Payload) 🧬
 *Detección de "rebotes" mediante huella digital criptográfica.*
@@ -147,7 +149,7 @@ A continuación se detallan todos los parámetros disponibles en el archivo de c
 
 LoopWarden utiliza un sistema de **Herencia de Configuración** para gestionar múltiples interfaces:
 1.  **Valores Globales:** Se aplican por defecto a todas las interfaces.
-2.  **Overrides (Excepciones):** Definidos por interfaz dentro de cada algoritmo. Si existen, reemplazan al valor global (para números) o se suman a él (para listas).
+2.  **Overrides (Excepciones):** Definidos por interfaz dentro de cada algoritmo. Si existen, reemplazan al valor global (para números/strings) o se suman a él (para listas).
 
 ### 🔌 Sistema y Red
 
@@ -188,6 +190,7 @@ Esta tabla muestra los parámetros globales. **Nota:** La columna "Override" ind
 | **[algorithms.active_probe]**| `enabled` | `true` | No | Activa/Desactiva la inyección activa de sondas. |
 | | `interval_ms` | `1000` | ✅ Sí | Frecuencia de envío de la sonda (milisegundos). |
 | | `ethertype` | `65535` | ❌ No | Protocolo Ethernet (0xFFFF) usado. Global para interoperabilidad. |
+| | `domain` | `"default"`| ✅ Sí | **Contexto de Red.** Etiqueta para agrupar sensores amigos (ej: "VLAN10"). Distinto dominio = Alerta de cruce. |
 | **[algorithms.mac_storm]** | `enabled` | `true` | No | Activa/Desactiva el limitador de velocidad por host. |
 | | `max_pps_per_mac`| `2000` | ✅ Sí | Máximo de paquetes/segundo permitidos por una única MAC. |
 | | `max_tracked_macs`| `10000`| ❌ No | **Protección OOM.** Límite de hosts en memoria. |
@@ -222,12 +225,24 @@ max_pps_per_mac = 1000  # Límite estricto por defecto (Servidores)
     [algorithms.mac_storm.overrides.wifi0]
     max_pps_per_mac = 5000
 
+# CONFIGURACIÓN CRÍTICA PARA ACTIVE PROBE EN MULTI-VLAN
+[algorithms.active_probe]
+interval_ms = 1000
+
+    # Interfaz en VLAN 10 (Servidores)
+    [algorithms.active_probe.overrides.eno1]
+    domain = "VLAN_10"   # Ignora a otros sensores "VLAN_10". Alerta si ve "VLAN_20".
+
+    # Interfaz en VLAN 20 (Usuarios)
+    [algorithms.active_probe.overrides.eno2]
+    domain = "VLAN_20"   # Debe tener distinto dominio para detectar el cruce.
+
 [algorithms.dhcp_hunter]
 trusted_macs = ["AA:BB:CC:DD:EE:FF"] # DHCP Corporativo (Global)
 
-    # Excepción para Laboratorio (eno2): Permite DHCP extra
-    [algorithms.dhcp_hunter.overrides.eno2]
-    trusted_macs = ["00:11:22:33:44:55"] # Resultado en eno2: Global + Local
+    # Excepción para Laboratorio (eno3): Permite DHCP extra
+    [algorithms.dhcp_hunter.overrides.eno3]
+    trusted_macs = ["00:11:22:33:44:55"] # Resultado en eno3: Global + Local
 ```
 
 ### 📊 Telemetría

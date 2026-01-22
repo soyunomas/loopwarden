@@ -61,8 +61,13 @@ chat_id = ""
     enabled = true
     interval_ms = 1000
     ethertype = 65535
-    magic_payload = "LOOPWARDEN_PROBE" # El sistema añadirá "|eno1" automáticamente.
-    target_mac = "" 
+    magic_payload = "LOOPWARDEN_PROBE" 
+    
+    # --- DOMAIN: Identificador de Red (CRÍTICO PARA MÚLTIPLES SENSORES) ---
+    # Define el "Nombre de la Red".
+    # - Si dos sensores comparten dominio (ej: "VLAN10"), se ignoran mutuamente (Vecinos).
+    # - Si recibes una sonda con dominio diferente, es una ALERTA de cruce de VLANs.
+    domain = "default"  
 
     # --- ALGORITMO 3: MAC Storm ---
     [algorithms.mac_storm]
@@ -83,7 +88,7 @@ chat_id = ""
     enabled = true
     max_pps = 500             # Límite para tráfico normal
     scan_ip_threshold = 10    # IPs únicas destino para considerar "Escaneo"
-    scan_mode_pps = 100       # Límite de PPS más estricto si se detecta escaneo
+    scan_mode_pps = 100       # Límite de PPS más estricto si se detecta modo escaneo
     alert_cooldown = "30s"
 
     # --- ALGORITMO 6: DhcpHunter ---
@@ -106,6 +111,17 @@ chat_id = ""
     [algorithms.mcast_policer]
     enabled = true
     max_pps = 8000
+
+# --- OVERRIDES: EJEMPLO DE CONFIGURACIÓN POR INTERFAZ ---
+# Aquí es donde configuras los dominios correctos para cada VLAN.
+
+    # Interfaz conectada a la VLAN 10
+    [algorithms.active_probe.overrides.eno1]
+    domain = "VLAN_10"    # Si ve otro sensor "VLAN_10", es AMIGO. Si ve "VLAN_20", es CRUCE.
+
+    # Interfaz conectada a la VLAN 20
+    [algorithms.active_probe.overrides.eno2]
+    domain = "VLAN_20"    # Debe ser distinto al de eno1 para detectar puentes entre ellos.
 
 # --- TELEMETRÍA Y OBSERVABILIDAD ---
 [telemetry]
