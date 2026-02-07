@@ -31,8 +31,9 @@ func TestEtherFuse_Detection(t *testing.T) {
 		Overrides:      make(map[string]config.EtherFuseOverride),
 	}
 
-	// UPDATED: Added "test0" ifaceName
-	ef := NewEtherFuse(cfg, mockNotifier(), "test0")
+	// FIX: Creamos el store y lo pasamos
+	store := NewTopologyStore()
+	ef := NewEtherFuse(cfg, mockNotifier(), "test0", store)
 	
 	dummyIface := &net.Interface{Name: "eth0"}
 	ef.Start(nil, dummyIface)
@@ -87,7 +88,6 @@ func TestMacStorm_Counter(t *testing.T) {
 		Overrides:    make(map[string]config.MacStormOverride),
 	}
 
-	// UPDATED: Added "test0" ifaceName
 	ms := NewMacStorm(cfg, mockNotifier(), "test0")
 	
 	dummyIface := &net.Interface{Name: "eth0"}
@@ -131,12 +131,15 @@ func TestActiveProbe_VlanOffset(t *testing.T) {
 		Overrides:    make(map[string]config.ActiveProbeOverride),
 	}
 
-	// Ya tenía ifaceName, mantenemos consistencia
-	ap := NewActiveProbe(cfg, mockNotifier(), "test_iface")
+	// FIX: Creamos el store y lo pasamos
+	store := NewTopologyStore()
+	ap := NewActiveProbe(cfg, mockNotifier(), "test_iface", store)
+	
 	myMac, _ := net.ParseMAC("00:11:22:33:44:55")
 	ap.myMAC = myMac
 	ap.ethertype = 0xFFFF 
 	ap.intervalMs = 1000
+	ap.domain = "default" // Importante inicializar dominio para evitar nil pointer o logic error
 
 	typeBytes := make([]byte, 2)
 	binary.BigEndian.PutUint16(typeBytes, 0xFFFF)
@@ -145,14 +148,14 @@ func TestActiveProbe_VlanOffset(t *testing.T) {
 	packetNative = append(packetNative, []byte{0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF}...) 
 	packetNative = append(packetNative, myMac...)                                       
 	packetNative = append(packetNative, typeBytes...)                                   
-	packetNative = append(packetNative, []byte("MAGIC|test_iface")...)                          
+	packetNative = append(packetNative, []byte("MAGIC|test_iface|default")...) // Payload v2 format                         
 
 	ap.lastAlert = time.Time{}
 	ap.OnPacket(packetNative, len(packetNative), 0)
 
 	ap.mu.Lock()
 	if ap.lastAlert.IsZero() {
-		t.Error("Falló detección en Native VLAN")
+		t.Error("Falló detección en Native VLAN (Self-Loop)")
 	}
 	ap.mu.Unlock()
 }
@@ -169,7 +172,6 @@ func TestFlapGuard_Flapping(t *testing.T) {
 		Overrides: make(map[string]config.FlapGuardOverride),
 	}
 
-	// UPDATED: Added "test0" ifaceName
 	fg := NewFlapGuard(cfg, mockNotifier(), "test0")
 	
 	dummyIface := &net.Interface{Name: "eth0"}
@@ -217,7 +219,6 @@ func TestArpWatchdog_ParserAndLimit(t *testing.T) {
 		Overrides: make(map[string]config.ArpWatchOverride),
 	}
 
-	// UPDATED: Added "test0" ifaceName
 	aw := NewArpWatchdog(cfg, mockNotifier(), "test0")
 	
 	dummyIface := &net.Interface{Name: "eth0"}
@@ -269,8 +270,9 @@ func BenchmarkEtherFuse_OnPacket(b *testing.B) {
 		StormPPSLimit:  10000000,
 		Overrides:      make(map[string]config.EtherFuseOverride),
 	}
-	// UPDATED
-	ef := NewEtherFuse(cfg, mockNotifier(), "bench")
+	// FIX: Store añadido
+	store := NewTopologyStore()
+	ef := NewEtherFuse(cfg, mockNotifier(), "bench", store)
 	ef.Start(nil, &net.Interface{Name: "bench"})
 
 	packet := bytes.Repeat([]byte("A"), 64)
@@ -289,7 +291,7 @@ func BenchmarkMacStorm_OnPacket(b *testing.B) {
 		MaxPPSPerMac: 50000000, 
 		Overrides:    make(map[string]config.MacStormOverride),
 	}
-	// UPDATED
+	
 	ms := NewMacStorm(cfg, mockNotifier(), "bench")
 	ms.Start(nil, &net.Interface{Name: "bench"})
 	
@@ -306,7 +308,7 @@ func BenchmarkMacStorm_OnPacket(b *testing.B) {
 
 func BenchmarkFlapGuard_OnPacket(b *testing.B) {
 	cfg := &config.FlapGuardConfig{Enabled: true, Threshold: 10000, Overrides: make(map[string]config.FlapGuardOverride)}
-	// UPDATED
+	
 	fg := NewFlapGuard(cfg, mockNotifier(), "bench")
 	fg.Start(nil, &net.Interface{Name: "bench"})
 	
@@ -329,8 +331,9 @@ func BenchmarkActiveProbe_OnPacket(b *testing.B) {
 		MagicPayload: "BENCHMARK_PAYLOAD",
 		Overrides:    make(map[string]config.ActiveProbeOverride),
 	}
-	// UPDATED
-	ap := NewActiveProbe(cfg, mockNotifier(), "bench")
+	// FIX: Store añadido
+	store := NewTopologyStore()
+	ap := NewActiveProbe(cfg, mockNotifier(), "bench", store)
 	
 	ap.myMAC, _ = net.ParseMAC("00:11:22:33:44:55")
 	ap.ethertype = 0xFFFF
@@ -361,7 +364,7 @@ func BenchmarkArpWatchdog_OnPacket(b *testing.B) {
 		MaxPPS:    100000000, 
 		Overrides: make(map[string]config.ArpWatchOverride),
 	}
-	// UPDATED
+	
 	aw := NewArpWatchdog(cfg, mockNotifier(), "bench")
 	aw.Start(nil, &net.Interface{Name: "bench"})
 

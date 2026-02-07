@@ -30,9 +30,6 @@ func Run(ctx context.Context, ifaceName string, cfg *config.Config, engine *dete
 	if err != nil {
 		return fmt.Errorf("[%s] failed to open raw socket: %w", ifaceName, err)
 	}
-	// Nota: No usamos defer conn.Close() aquí de forma simple, 
-	// porque lo cerraremos explícitamente en el Breaker para desbloquear el Read.
-	// Sin embargo, Go permite Close() múltiples veces sin pánico, así que lo mantenemos por seguridad.
 	defer conn.Close()
 
 	engine.StartAll(conn, ifi)
@@ -41,11 +38,26 @@ func Run(ctx context.Context, ifaceName string, cfg *config.Config, engine *dete
 		log.Printf("[%s] Warning: Failed to set promiscuous mode: %v", ifaceName, err)
 	}
 
+	// --- BPF FILTER CONFIGURATION ---
+	// ARQUITECTURA: Permitimos tráfico con bit multicast (incluye broadcast)
+	// Esto incluye:
+	// - Broadcast (FF:FF:...) -> ActiveProbe, ARP, DHCP
+	// - Multicast Standard (01:00:5E...) -> EtherFuse, McastPolicer
+	// - Multicast Control (01:80:C2...) -> STP, LLDP (0x88CC), LACP
+	// - Multicast Cisco (01:00:0C...) -> CDP, VTP, DTP
+	// 
+	// NOTA: No filtramos por EtherType específico en el BPF para no cegar a los
+	// motores de seguridad (ArpWatch, FlowPanic) que necesitan ver protocolos variados.
 	filter, err := bpf.Assemble([]bpf.Instruction{
+		// 1. Cargar Byte 0 de la MAC Destino
 		bpf.LoadAbsolute{Off: 0, Size: 1},
+		// 2. Comprobar Bit Multicast (Bit 0 del Byte 0 == 1)
 		bpf.ALUOpConstant{Op: bpf.ALUOpAnd, Val: 1},
+		// 3. Si es 0 (Unicast), saltar a DROP (Ret 0). Si es 1, continuar.
 		bpf.JumpIf{Cond: bpf.JumpEqual, Val: 0, SkipTrue: 1},
+		// 4. Aceptar (Ret SnapLen)
 		bpf.RetConstant{Val: uint32(cfg.Network.SnapLen)}, 
+		// 5. Rechazar (Ret 0)
 		bpf.RetConstant{Val: 0},                           
 	})
 	if err != nil {
@@ -56,7 +68,7 @@ func Run(ctx context.Context, ifaceName string, cfg *config.Config, engine *dete
 		return fmt.Errorf("[%s] failed to apply BPF filter: %w", ifaceName, err)
 	}
 
-	log.Printf("🛡️  Sniffer active on %s [BPF Active]", ifaceName)
+	log.Printf("🛡️  Sniffer active on %s [BPF: Multicast+Broadcast]", ifaceName)
 
 	// --- 1. MONITOR DE DROPS ---
 	go func() {
@@ -85,8 +97,6 @@ func Run(ctx context.Context, ifaceName string, cfg *config.Config, engine *dete
 	}()
 
 	// --- 2. SHUTDOWN BREAKER (LA SOLUCIÓN AL HANG) ---
-	// Esta goroutine espera la señal de cancelación y mata el socket.
-	// Esto hace que ReadFrom desbloquee inmediatamente con error.
 	go func() {
 		<-ctx.Done()
 		conn.Close() // <--- CRÍTICO: Fuerza el error en ReadFrom
@@ -96,23 +106,14 @@ func Run(ctx context.Context, ifaceName string, cfg *config.Config, engine *dete
 	buf := make([]byte, cfg.Network.SnapLen)
 
 	for {
-		// Ya no necesitamos select case <-ctx.Done() aquí al principio
-		// porque el error de ReadFrom manejará la salida.
-
-		// Mantenemos el Deadline para evitar zombies si el breaker fallara (defensa en profundidad)
 		conn.SetReadDeadline(time.Now().Add(1 * time.Second))
 		
 		n, _, err := conn.ReadFrom(buf)
 		if err != nil {
-			// Comprobamos si el error es porque cerramos el socket (shutdown limpio)
-			// Go suele devolver "use of closed network connection" o "file already closed"
 			if strings.Contains(err.Error(), "closed") {
-				return nil // Salida limpia inmediata
+				return nil 
 			}
-
-			// Si es timeout, solo volvemos a intentar (el contexto se chequeará implicitamente al intentar leer de nuevo si está cerrado)
 			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
-				// Verificamos contexto por si acaso fue un timeout natural justo durante el shutdown
 				select {
 				case <-ctx.Done():
 					return nil
@@ -120,12 +121,11 @@ func Run(ctx context.Context, ifaceName string, cfg *config.Config, engine *dete
 					continue
 				}
 			}
-
 			log.Printf("⚠️ [%s] Read error: %v", ifaceName, err)
 			continue
 		}
 
-		// --- PROCESAMIENTO (Sin cambios) ---
+		// --- PROCESAMIENTO ---
 		start := time.Now()
 
 		telemetry.TrackPacket(ifaceName, buf[:n], n)

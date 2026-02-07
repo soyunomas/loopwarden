@@ -115,20 +115,63 @@ LoopWarden ejecuta **9 motores de detección concurrentes**. Cada uno busca una 
     *   **Local:** Relaja o endurece las reglas para puertos específicos (ej: "La interfaz `vlan_guest` puede hacer más peticiones ARP, pero `mgmt` tiene tolerancia cero").
 *   **💡 Valor Diferencial:** Permite desplegar una sola instancia de LoopWarden para monitorizar entornos heterogéneos (Servidores, IoT, Usuarios, Wi-Fi) sin generar falsos positivos en las zonas ruidosas.
 
+#### 11. Neighbor Discovery (Conciencia de Topología) 🗺️
+*Contexto físico para cada alerta.*
+
+*   **🔬 Mecánica:** Un motor pasivo que decodifica tramas **LLDP** (Link Layer Discovery Protocol) y **CDP** (Cisco Discovery Protocol) en tiempo real. Extrae el Nombre del Sistema, Puerto, Chasis ID y **Dirección IP de Gestión** del switch vecino.
+*   **🛡️ Lógica:** No genera alertas por sí mismo. Su función es mantener un "Mapa de Vecinos" en memoria (`TopologyStore`). Cuando otro motor (ej: *EtherFuse*) detecta un bucle, consulta este mapa para decirte no solo *que* hay un bucle, sino **exactamente en qué switch y puerto físico está conectado el sensor**.
+*   **💡 Valor Diferencial:** Convierte una alerta genérica ("Bucle en eth0") en una orden de trabajo precisa ("Bucle en eth0, conectado al Switch-Core-01, Puerto Gi1/0/48, IP 10.10.1.1").
+
 ---
 
-### 📊 Telemetría y Observabilidad (Prometheus)
+### 📊 Telemetría y Observabilidad (Prometheus & API)
 
-LoopWarden expone de forma nativa un endpoint compatible con **Prometheus** en el puerto `:9090/metrics`. Esto permite visualizar la salud de la red y del propio motor de detección en tiempo real a través de Grafana, sin necesidad de agentes externos.
+LoopWarden está diseñado bajo la filosofía "Glass Box": visibilidad total interna y externa sin necesidad de agentes de terceros. El sistema expone un servidor HTTP ligero (default `:9090`) con dos endpoints clave para la operación diaria.
 
-*   **Forense de Capa 2:** Desglose granular del tráfico por protocolo (ARP, IPv4, IPv6, VLAN Tagged, LLDP) y tipo de transmisión (Broadcast vs Multicast). Permite identificar qué protocolo exacto está saturando el enlace.
+#### 1. Métricas de Rendimiento (`/metrics`)
+Endpoint compatible nativamente con **Prometheus**. Permite visualizar la salud de la red y del motor de detección en tiempo real a través de Grafana.
+
+*   **Forense de Capa 2:** Desglose granular del tráfico por protocolo (ARP, IPv4, IPv6, VLAN Tagged, LLDP, Control Frames) y tipo de transmisión (Broadcast vs Multicast). Identifica qué protocolo exacto está saturando el enlace.
 *   **Salud del Kernel (Zero-Blindness):** Monitoriza directamente los contadores de descarte del driver de red (`rx_dropped`). Si el Kernel descarta paquetes por saturación de buffer antes de que LoopWarden pueda leerlos, la métrica `loopwarden_socket_drops_total` lo revelará, garantizando que no existan puntos ciegos operativos.
-*   **Tendencias de Amenazas:** Contadores específicos para cada motor de detección (`EngineHits`). Permite correlacionar picos de CPU en los switches con tormentas ARP o bucles físicos detectados históricamente.
-*   **Perfilado de Latencia:** Histogramas de precisión de nanosegundos (`loopwarden_processing_ns`) que miden el tiempo que tarda cada paquete en atravesar los 9 motores de detección, validando el rendimiento "Fast-Path".
+*   **Tendencias de Amenazas:** Contadores específicos para cada motor de detección (`loopwarden_engine_hits_total`). Permite correlacionar picos de CPU en los switches con tormentas ARP o bucles físicos detectados históricamente.
+*   **Perfilado de Latencia:** Histogramas de precisión de nanosegundos (`loopwarden_processing_ns`) que miden el tiempo que tarda cada paquete en atravesar la pila de motores, validando el rendimiento "Fast-Path".
 
 **Verificación Rápida:**
 ```bash
 curl http://localhost:9090/metrics
+```
+
+#### 2. API de Topología en Vivo (`/topology`)
+Gracias al motor *Neighbor Discovery*, LoopWarden mantiene un "mapa de vecindad" en tiempo real escuchando tramas LLDP y CDP. Este endpoint devuelve un snapshot **JSON** del estado actual de las conexiones físicas.
+
+Es ideal para **Scripts de Automatización**, sistemas de Inventario Dinámico o simplemente para saber "¿A qué diablos está conectado este cable?" sin ir al rack.
+
+**Ejemplo de Respuesta:**
+```json
+{
+  "timestamp": "2025-02-07T10:00:00Z",
+  "sensor": "LoopWarden-RackA",
+  "neighbor_count": 2,
+  "neighbors": {
+    "eno1": {
+      "SystemName": "Switch-Core-01",
+      "SystemDesc": "Cisco IOS Software, C2960X Software (X86)...",
+      "PortID": "GigabitEthernet1/0/48",
+      "ManagementIP": "10.20.1.5",
+      "Protocol": "CDP",
+      "VLAN": 1,
+      "AdvertisedTTL": 180000000000,
+      "LastSeen": "2025-02-07T09:59:55Z"
+    },
+    "eno2": {
+      "SystemName": "Access-Switch-Lab",
+      "PortID": "eth0",
+      "Protocol": "LLDP",
+      "ManagementIP": "192.168.100.2",
+      "LastSeen": "2025-02-07T09:58:30Z"
+    }
+  }
+}
 ```
 
 ---
@@ -213,6 +256,7 @@ Esta tabla muestra los parámetros globales. **Nota:** La columna "Override" ind
 | | `trusted_macs` | `[]` | ✅ Append | Únicas MACs permitidas para actuar como Router IPv6 (Aditivo). |
 | **[algorithms.mcast_policer]**| `enabled` | `true` | No | Control de tráfico Multicast. |
 | | `max_pps` | `8000` | ✅ Sí | Límite global de paquetes multicast por segundo. |
+| **[algorithms.neighbor_discovery]** | `enabled` | `true` | No | Activa la escucha pasiva de LLDP/CDP. Es vital para enriquecer las alertas con datos del switch vecino. |
 
 #### Ejemplo de Configuración con Overrides
 
@@ -371,8 +415,7 @@ Guía de actuación rápida para operadores de red (NOC) ante alertas críticas 
 
 | Alerta Recibida | Causa Probable | Acción Recomendada |
 | :--- | :--- | :--- |
-| **ActiveProbe:**<br>`LOOP CONFIRMED` | **Bucle Físico Cerrado (Hard Loop).**<br>Un cable conecta dos puertos del mismo dominio de broadcast y STP no lo ha bloqueado. | **ACCION INMEDIATA (CRÍTICO)**<br>1. El bucle es físico y total. La red caerá en segundos.<br>2. Revisa los últimos cables conectados.<br>3. Desconecta enlaces redundantes hasta que cese la alerta. |
-| **MacStorm:**<br>`MAC VELOCITY ALERT` | **Host Inundador.**<br>Tarjeta de red averiada ("Jabbering NIC"), virus o bucle local. | **AISLAR Y APAGAR**<br>1. Copia la MAC de la alerta.<br>2. Búscala en el switch: `show mac address-table address <MAC>`.<br>3. Apaga el puerto (`shutdown`). |
+| **ActiveProbe:**<br>`LOOP CONFIRMED` | **Bucle Físico Cerrado.** | **ACCION INMEDIATA**<br>La alerta ahora incluye el campo `CONNECTED TO`. **Ve directamente a ese switch y puerto indicado** y desconecta el cable. No necesitas rastrear cables manualmente. |
 | **FlapGuard:**<br>`MAC FLAPPING` | **Inestabilidad de Topología.**<br>Un cable puenteando dos VLANs o error de Native VLAN. | **INVESTIGAR CABLEADO**<br>1. Rastrea la MAC para ver entre qué puertos salta.<br>2. Verifica "Native VLAN" en Trunks. |
 | **ArpWatchdog:**<br>`ARP STORM` | **Tormenta de Plano de Control.**<br>Síntoma temprano de bucle o escaneo masivo. | **CORRELACIONAR**<br>1. Si aparece con *EtherFuse*, es un bucle.<br>2. Si aparece sola, es un host infectado: localízalo y aíslalo. |
 | **DhcpHunter:**<br>`ROGUE DHCP` | **Router doméstico conectado.**<br>Alguien conectó un router TP-Link/D-Link por el puerto LAN. | **BLOQUEO INMEDIATO**<br>La MAC reportada es el puerto del router intruso. Bloquea ese puerto en el switch o usa *BPDU Guard*. |

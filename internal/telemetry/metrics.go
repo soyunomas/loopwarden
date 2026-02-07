@@ -63,6 +63,13 @@ var (
 		Name: "loopwarden_arp_ops_total",
 		Help: "ARP operations breakdown (request/reply)",
 	}, []string{"interface", "operation"})
+
+	// 7. TOPOLOGÍA
+	// Etiquetas: interface, protocol (LLDP/CDP)
+	NeighborsDetected = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "loopwarden_neighbor_packets_total",
+		Help: "Number of valid LLDP/CDP packets received containing topology info",
+	}, []string{"interface", "protocol"})
 )
 
 // TrackPacket analiza el paquete RAW y actualiza métricas.

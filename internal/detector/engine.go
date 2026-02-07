@@ -20,25 +20,38 @@ type Engine struct {
 	algorithms []Algorithm
 	cfg        *config.AlgorithmConfig
 	mu         sync.RWMutex
-	ifaceName  string // Identidad del Engine
+	ifaceName  string
+	store      *TopologyStore // Store compartido
 }
 
-// NewEngine propaga ifaceName a todos los constructores
-func NewEngine(cfg *config.AlgorithmConfig, notify *notifier.Notifier, ifaceName string) *Engine {
+// NewEngine inicializa todos los motores, inyectando dependencias.
+// Ahora recibe TopologyStore y lo propaga a NeighborDiscovery, EtherFuse y ActiveProbe.
+func NewEngine(cfg *config.AlgorithmConfig, notify *notifier.Notifier, ifaceName string, store *TopologyStore) *Engine {
 	e := &Engine{
 		cfg:        cfg,
 		ifaceName:  ifaceName,
+		store:      store,
 		algorithms: make([]Algorithm, 0),
 	}
 
-	// 1. EtherFuse
-	if cfg.EtherFuse.Enabled {
-		e.algorithms = append(e.algorithms, NewEtherFuse(&cfg.EtherFuse, notify, ifaceName))
+	// 0. Neighbor Discovery (Always On / Passive)
+	// Primer algoritmo para alimentar el store lo antes posible.
+	// MODIFICACIÓN: Ahora chequeamos la configuración.
+	if cfg.NeighborDiscovery.Enabled {
+		e.algorithms = append(e.algorithms, NewNeighborDiscovery(store, ifaceName))
+		// No logueamos "Initialized" aquí para no saturar, se loguea en Start() de cada algoritmo
+	} else {
+		log.Printf("ℹ️  [Engine:%s] Neighbor Discovery DISABLED (Topology features limited)", ifaceName)
 	}
 
-	// 2. ActiveProbe
+	// 1. EtherFuse (Topología Inyectada)
+	if cfg.EtherFuse.Enabled {
+		e.algorithms = append(e.algorithms, NewEtherFuse(&cfg.EtherFuse, notify, ifaceName, store))
+	}
+
+	// 2. ActiveProbe (Topología Inyectada)
 	if cfg.ActiveProbe.Enabled {
-		e.algorithms = append(e.algorithms, NewActiveProbe(&cfg.ActiveProbe, notify, ifaceName))
+		e.algorithms = append(e.algorithms, NewActiveProbe(&cfg.ActiveProbe, notify, ifaceName, store))
 	}
 
 	// 3. MacStorm

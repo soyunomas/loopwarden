@@ -2,6 +2,7 @@ package main
 
 import (
 	"context" 
+	"encoding/json" // <--- Importante
 	"flag"
 	"fmt"
 	"io"
@@ -11,6 +12,7 @@ import (
 	"os/signal"
 	"sync"
 	"syscall"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/soyunomas/loopwarden/internal/config"
@@ -55,11 +57,13 @@ func main() {
 		log.Fatal("❌ No interfaces defined in config (network.interfaces = [])")
 	}
 
-	// --- CAMBIO CRÍTICO: GESTIÓN DE SEÑALES CON CONTEXTO ---
-	// Creamos un contexto cancelable para coordinar el apagado
+	// 2.5 Topology Store (Shared State)
+	topologyStore := detector.NewTopologyStore()
+	topologyStore.StartCleanup() 
+
+	// --- CAMBIO CRÍTICO: GESTIÓN DE SEÑALES ---
 	ctx, cancel := context.WithCancel(context.Background())
 	
-	// Canal de señales solo para el main
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 
@@ -76,11 +80,11 @@ func main() {
 		go func(iface string) {
 			defer wg.Done()
 			
-			engine := detector.NewEngine(&cfg.Algorithms, notify, iface)
+			// Inyectamos el topologyStore
+			engine := detector.NewEngine(&cfg.Algorithms, notify, iface, topologyStore)
 
 			log.Printf("🚀 Launching stack for %s", iface)
 			
-			// AHORA PASAMOS 'ctx' EN LUGAR DE 'sigChan'
 			if err := sniffer.Run(ctx, iface, cfg, engine); err != nil {
 				log.Printf("❌ Critical error on interface %s: %v", iface, err)
 				notify.Alert(fmt.Sprintf("❌ Stack failure on %s: %v", iface, err))
@@ -90,15 +94,46 @@ func main() {
 		}(currentIface)
 	}
 
-	// 4. Telemetría
+	// 4. Telemetría y API de Topología
 	if cfg.Telemetry.Enabled {
 		go func() {
 			addr := cfg.Telemetry.ListenAddress
 			if addr == "" { addr = ":9090" }
+
+			// Endpoint Prometheus Estándar
 			http.Handle("/metrics", promhttp.Handler())
-			// Servidor HTTP también debería cerrarse, pero en toolings simples se suele dejar morir con el proceso.
-			// Para perfección, se podría usar server.Shutdown(ctx), pero no es crítico aquí.
-			log.Printf("📊 Metrics server listening on %s", addr)
+
+			// --- NUEVO: Endpoint de Topología ---
+			// Devuelve JSON con el estado actual de los vecinos
+			http.HandleFunc("/topology", func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != http.MethodGet {
+					http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+					return
+				}
+
+				snapshot := topologyStore.GetAll()
+				
+				w.Header().Set("Content-Type", "application/json")
+				// Estructura de respuesta para facilitar parsing
+				response := struct {
+					Timestamp time.Time `json:"timestamp"`
+					Sensor    string    `json:"sensor"`
+					Count     int       `json:"neighbor_count"`
+					Neighbors map[string]detector.NeighborInfo `json:"neighbors"`
+				}{
+					Timestamp: time.Now(),
+					Sensor:    sensorName,
+					Count:     len(snapshot),
+					Neighbors: snapshot,
+				}
+
+				if err := json.NewEncoder(w).Encode(response); err != nil {
+					log.Printf("⚠️ Error encoding topology JSON: %v", err)
+				}
+			})
+			// ------------------------------------
+
+			log.Printf("📊 Metrics & API server listening on %s", addr)
 			if err := http.ListenAndServe(addr, nil); err != nil {
 				log.Printf("⚠️ Failed to start metrics: %v", err)
 			}
@@ -106,14 +141,10 @@ func main() {
 	}
 
 	// BLOQUEO PRINCIPAL
-	// Esperamos aquí hasta recibir la señal
 	receivedSig := <-sigChan 
 	fmt.Printf("\nSignal received (%v), shutting down stacks...\n", receivedSig)
 	
-	// 1. Ordenamos a todos los sniffers que paren
 	cancel() 
-	
-	// 2. Esperamos a que terminen limpiamente
 	wg.Wait()
 	
 	notify.Alert("🔴 LoopWarden stopped gracefully")
