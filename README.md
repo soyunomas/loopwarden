@@ -3,7 +3,7 @@
 ![Go Version](https://img.shields.io/badge/go-1.21%2B-blue)
 ![Platform](https://img.shields.io/badge/platform-linux-lightgrey)
 ![License](https://img.shields.io/badge/license-MIT-green)
-![Performance](https://img.shields.io/badge/performance-10Gbps%20Ready-brightgreen)
+![Performance](https://img.shields.io/badge/performance-High%20Performance-brightgreen)
 
 **LoopWarden** es un Detector de Bucles Ethernet (L2 Loop Detector) de alto rendimiento. Monitoriza la red en tiempo real para alertar sobre bucles físicos y tormentas de broadcast en milisegundos, reduciendo drásticamente el tiempo de diagnóstico (MTTR).
 
