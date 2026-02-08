@@ -1,6 +1,6 @@
 # 🛡️ LoopWarden
 
-![Go Version](https://img.shields.io/badge/go-1.21%2B-blue)
+![Go Version](https://img.shields.io/badge/go-1.25%2B-blue)
 ![Platform](https://img.shields.io/badge/platform-linux-lightgrey)
 ![License](https://img.shields.io/badge/license-MIT-green)
 ![Performance](https://img.shields.io/badge/performance-High%20Performance-brightgreen)
@@ -9,12 +9,12 @@
 
 ## 🚀 Características Principales
 
-LoopWarden ejecuta **9 motores de detección concurrentes**. Cada uno busca una "firma" específica de fallo o amenaza en la red, proporcionando una visibilidad completa de Capa 2:
+LoopWarden ejecuta **10 motores de detección concurrentes**. Cada uno busca una "firma" específica de fallo o amenaza en la red, proporcionando una visibilidad completa de Capa 2:
 
 ### 1. ActiveProbe (Inyección Activa Determinista) ⚡
 *El "Sonar" de la red. La única forma de tener certeza.*
 
-*   **🔬 Mecánica:** LoopWarden genera e inyecta una trama Ethernet unicast (Broadcast `FF:FF...`) con un EtherType `0xFFFF` configurable. El payload contiene una firma mágica, la identidad de la interfaz y un **Dominio de Red** (Domain ID).
+*   **🔬 Mecánica:** LoopWarden genera e inyecta una trama Ethernet broadcast (`FF:FF:FF:FF:FF:FF`) con un EtherType `0xFFFF` configurable. El payload contiene una firma mágica, la identidad de la interfaz y un **Dominio de Red** (Domain ID).
 *   **🛡️ Lógica de Detección (Topology Awareness):**
     *   **Auto-Bucle (Hard Loop):** Si la sonda regresa con la **misma MAC de origen**, es un bucle físico en el propio puerto. (Alerta Crítica).
     *   **Vecino Legítimo:** Si la sonda viene de otra MAC pero tiene el **mismo Dominio** (ej: ambos son "VLAN10"), se considera otro sensor LoopWarden conviviendo en la misma red. (Silencio).
@@ -27,7 +27,7 @@ LoopWarden ejecuta **9 motores de detección concurrentes**. Cada uno busca una 
 
 
 ### 2. EtherFuse (Análisis Pasivo de Payload) 🧬
-*Detección de "rebotes" mediante huella digital criptográfica.*
+*Detección de "rebotes" mediante huella digital de hash rápido.*
 
 *   **🔬 Mecánica:** Inspecciona pasivamente el tráfico Broadcast/Multicast entrante. Calcula un hash ultrarrápido (FNV-1a) del contenido (payload) de la trama. Almacena estos hashes en un buffer circular.
 *   **🛡️ Lógica de Detección:** Si el sistema observa el mismo hash `N` veces en una ventana de tiempo de milisegundos, significa que la trama está "orbitando" la red infinitamente.

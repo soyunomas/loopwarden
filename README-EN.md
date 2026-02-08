@@ -1,6 +1,6 @@
 # 🛡️ LoopWarden
 
-![Go Version](https://img.shields.io/badge/go-1.21%2B-blue)
+![Go Version](https://img.shields.io/badge/go-1.25%2B-blue)
 ![Platform](https://img.shields.io/badge/platform-linux-lightgrey)
 ![License](https://img.shields.io/badge/license-MIT-green)
 ![Performance](https://img.shields.io/badge/performance-High%20Performance-brightgreen)
@@ -9,12 +9,12 @@
 
 ## 🚀 Key Features
 
-LoopWarden runs **9 concurrent detection engines**. Each one looks for a specific "signature" of failure or threat on the network, providing complete Layer 2 visibility:
+LoopWarden runs **10 concurrent detection engines**. Each one looks for a specific "signature" of failure or threat on the network, providing complete Layer 2 visibility:
 
 ### 1. ActiveProbe (Deterministic Active Injection) ⚡
 *The network's "Sonar". The only way to be certain.*
 
-*   **🔬 Mechanics:** LoopWarden generates and injects a unicast Ethernet frame (Broadcast `FF:FF...`) with a configurable EtherType `0xFFFF`. The payload contains a magic signature, the interface identity, and a **Network Domain** (Domain ID).
+*   **🔬 Mechanics:** LoopWarden generates and injects a broadcast Ethernet frame (`FF:FF:FF:FF:FF:FF`) with a configurable EtherType `0xFFFF`. The payload contains a magic signature, the interface identity, and a **Network Domain** (Domain ID).
 *   **🛡️ Detection Logic (Topology Awareness):**
     *   **Self-Loop (Hard Loop):** If the probe returns with the **same source MAC**, it's a physical loop on the port itself. (Critical Alert).
     *   **Legitimate Neighbor:** If the probe comes from another MAC but has the **same Domain** (e.g., both are "VLAN10"), it's considered another LoopWarden sensor coexisting on the same network. (Silence).
@@ -27,7 +27,7 @@ LoopWarden runs **9 concurrent detection engines**. Each one looks for a specifi
 
 
 ### 2. EtherFuse (Passive Payload Analysis) 🧬
-*Detection of "bounces" through cryptographic fingerprinting.*
+*Detection of "bounces" through fast hash fingerprinting.*
 
 *   **🔬 Mechanics:** Passively inspects incoming Broadcast/Multicast traffic. Calculates an ultra-fast hash (FNV-1a) of the frame content (payload). Stores these hashes in a circular buffer.
 *   **🛡️ Detection Logic:** If the system observes the same hash `N` times within a millisecond time window, it means the frame is "orbiting" the network infinitely.
