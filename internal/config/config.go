@@ -30,7 +30,7 @@ type NetworkConfig struct {
 }
 
 type AlgorithmConfig struct {
-	NeighborDiscovery NeighborDiscoveryConfig `toml:"neighbor_discovery"` // <--- NUEVO
+	NeighborDiscovery NeighborDiscoveryConfig `toml:"neighbor_discovery"`
 	EtherFuse         EtherFuseConfig         `toml:"etherfuse"`
 	ActiveProbe       ActiveProbeConfig       `toml:"active_probe"`
 	MacStorm          MacStormConfig          `toml:"mac_storm"`
@@ -40,12 +40,21 @@ type AlgorithmConfig struct {
 	FlowPanic         FlowPanicConfig         `toml:"flow_panic"`
 	RaGuard           RaGuardConfig           `toml:"ra_guard"`
 	McastPolicer      McastPolicerConfig      `toml:"mcast_policer"`
+	BcastRatio        BcastRatioConfig        `toml:"bcast_ratio"`
+	VlanLeak          VlanLeakConfig          `toml:"vlan_leak"` // <--- NUEVO (Fase 2)
+	MetaEngine        MetaEngineConfig        `toml:"meta_engine"`
 }
 
 // --- ALGORITMOS ---
 
 type NeighborDiscoveryConfig struct {
 	Enabled bool `toml:"enabled"`
+}
+
+type VlanLeakConfig struct {
+	Enabled         bool     `toml:"enabled"`
+	ProhibitedPairs [][]int  `toml:"prohibited_pairs"` // Ej: [[10,20], [100,200]]
+	AlertCooldown   string   `toml:"alert_cooldown"`
 }
 
 type EtherFuseConfig struct {
@@ -111,6 +120,7 @@ type ArpWatchConfig struct {
 	ScanIPThreshold int    `toml:"scan_ip_threshold"`
 	ScanModePPS     uint64 `toml:"scan_mode_pps"`
 	AlertCooldown   string `toml:"alert_cooldown"`
+	GarpThreshold   uint64 `toml:"garp_threshold"` // Fase 2
 
 	Overrides map[string]ArpWatchOverride `toml:"overrides"`
 }
@@ -165,6 +175,27 @@ type McastPolicerConfig struct {
 
 type McastPolicerOverride struct {
 	MaxPPS uint64 `toml:"max_pps"`
+}
+
+type BcastRatioConfig struct {
+	Enabled       bool    `toml:"enabled"`
+	MaxRatio      float64 `toml:"max_ratio"`
+	MinSampleSize uint64  `toml:"min_sample_size"`
+	AlertCooldown string  `toml:"alert_cooldown"`
+
+	Overrides map[string]BcastRatioOverride `toml:"overrides"`
+}
+
+type BcastRatioOverride struct {
+	MaxRatio      float64 `toml:"max_ratio"`
+	MinSampleSize uint64  `toml:"min_sample_size"`
+}
+
+type MetaEngineConfig struct {
+	Enabled   bool   `toml:"enabled"`
+	Window    string `toml:"window"`
+	Threshold int    `toml:"threshold"`
+	Cooldown  string `toml:"cooldown"`
 }
 
 // --- ALERTAS ---

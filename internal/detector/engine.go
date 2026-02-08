@@ -4,6 +4,7 @@ import (
 	"log"
 	"net"
 	"sync"
+	"time"
 
 	"github.com/mdlayher/packet"
 	"github.com/soyunomas/loopwarden/internal/config"
@@ -21,11 +22,10 @@ type Engine struct {
 	cfg        *config.AlgorithmConfig
 	mu         sync.RWMutex
 	ifaceName  string
-	store      *TopologyStore // Store compartido
+	store      *TopologyStore
+	metaEngine *MetaEngine
 }
 
-// NewEngine inicializa todos los motores, inyectando dependencias.
-// Ahora recibe TopologyStore y lo propaga a NeighborDiscovery, EtherFuse y ActiveProbe.
 func NewEngine(cfg *config.AlgorithmConfig, notify *notifier.Notifier, ifaceName string, store *TopologyStore) *Engine {
 	e := &Engine{
 		cfg:        cfg,
@@ -34,22 +34,20 @@ func NewEngine(cfg *config.AlgorithmConfig, notify *notifier.Notifier, ifaceName
 		algorithms: make([]Algorithm, 0),
 	}
 
-	// 0. Neighbor Discovery (Always On / Passive)
-	// Primer algoritmo para alimentar el store lo antes posible.
-	// MODIFICACIÓN: Ahora chequeamos la configuración.
+	// 0. Neighbor Discovery (Passive, Always On preferrably)
 	if cfg.NeighborDiscovery.Enabled {
-		e.algorithms = append(e.algorithms, NewNeighborDiscovery(store, ifaceName))
-		// No logueamos "Initialized" aquí para no saturar, se loguea en Start() de cada algoritmo
+		// FIX: Ahora pasamos 'notify' porque NeighborDiscovery puede alertar (N1 Feature)
+		e.algorithms = append(e.algorithms, NewNeighborDiscovery(store, ifaceName, notify))
 	} else {
-		log.Printf("ℹ️  [Engine:%s] Neighbor Discovery DISABLED (Topology features limited)", ifaceName)
+		log.Printf("ℹ️  [Engine:%s] Neighbor Discovery DISABLED", ifaceName)
 	}
 
-	// 1. EtherFuse (Topología Inyectada)
+	// 1. EtherFuse
 	if cfg.EtherFuse.Enabled {
 		e.algorithms = append(e.algorithms, NewEtherFuse(&cfg.EtherFuse, notify, ifaceName, store))
 	}
 
-	// 2. ActiveProbe (Topología Inyectada)
+	// 2. ActiveProbe
 	if cfg.ActiveProbe.Enabled {
 		e.algorithms = append(e.algorithms, NewActiveProbe(&cfg.ActiveProbe, notify, ifaceName, store))
 	}
@@ -89,8 +87,32 @@ func NewEngine(cfg *config.AlgorithmConfig, notify *notifier.Notifier, ifaceName
 		e.algorithms = append(e.algorithms, NewMcastPolicer(&cfg.McastPolicer, notify, ifaceName))
 	}
 
+	// 10. BcastRatio
+	if cfg.BcastRatio.Enabled {
+		e.algorithms = append(e.algorithms, NewBcastRatio(&cfg.BcastRatio, notify, ifaceName, store))
+	}
+
+	// 11. VlanLeak (NUEVO FASE 2)
+	if cfg.VlanLeak.Enabled {
+		e.algorithms = append(e.algorithms, NewVlanLeak(&cfg.VlanLeak, notify, ifaceName, store))
+		log.Printf("✅ [Engine:%s] VlanLeak detector loaded", ifaceName)
+	}
+
+	// Meta-Engine (Correlación)
+	if cfg.MetaEngine.Enabled {
+		window, _ := time.ParseDuration(cfg.MetaEngine.Window)
+		cooldown, _ := time.ParseDuration(cfg.MetaEngine.Cooldown)
+		e.metaEngine = NewMetaEngine(notify, ifaceName, store, window, cfg.MetaEngine.Threshold, cooldown)
+	}
+
 	log.Printf("✅ [Engine:%s] Initialized with %d algorithms", ifaceName, len(e.algorithms))
 	return e
+}
+
+func (e *Engine) RecordHit(engineName string, threatType string) {
+	if e.metaEngine != nil {
+		e.metaEngine.RecordHit(engineName, threatType)
+	}
 }
 
 func (e *Engine) StartAll(conn *packet.Conn, iface *net.Interface) {
@@ -103,7 +125,7 @@ func (e *Engine) StartAll(conn *packet.Conn, iface *net.Interface) {
 
 func (e *Engine) DispatchPacket(data []byte, length int, vlanID uint16) {
 	e.mu.RLock()
-	// Precepto #41: Mid-stack inlining optimization
+	// Optimización: Inlining manual del loop caliente
 	for _, algo := range e.algorithms {
 		algo.OnPacket(data, length, vlanID)
 	}

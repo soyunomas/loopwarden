@@ -119,6 +119,22 @@ chat_id = ""
     enabled = true
     max_pps = 8000
 
+    # --- ALGORITMO 10: BcastRatio ---
+    # Alerta temprana cuando el ratio broadcast/total supera un umbral
+    [algorithms.bcast_ratio]
+    enabled = true
+    max_ratio = 0.7           # 70% - porcentaje máximo de broadcast permitido
+    min_sample_size = 100     # Mínimo de paquetes por segundo para evaluar
+    alert_cooldown = "30s"
+
+    # --- META-ENGINE: Correlación Multi-Motor ---
+    # Eleva severidad a CONFIRMED cuando 2+ motores disparan en ventana <2s
+    [algorithms.meta_engine]
+    enabled = true
+    window = "2s"
+    threshold = 2
+    cooldown = "30s"
+
 # --- OVERRIDES: EJEMPLO DE CONFIGURACIÓN POR INTERFAZ ---
 # Aquí es donde configuras los dominios correctos para cada VLAN.
 

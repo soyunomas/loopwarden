@@ -13,6 +13,7 @@ type NeighborInfo struct {
 	PortID        string
 	ChassisID     string
 	VLAN          uint16
+	NativeVLAN    uint16 // VLAN nativa anunciada por vecino (de LLDP/CDP)
 	ManagementIP  string
 	Protocol      string        // "LLDP" o "CDP"
 	AdvertisedTTL time.Duration // TTL dinámico reportado por el vecino

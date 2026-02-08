@@ -1,6 +1,7 @@
 package detector
 
 import (
+	"bytes" // Usado para GARP check
 	"encoding/binary"
 	"fmt"
 	"log"
@@ -31,10 +32,10 @@ type arpStats struct {
 type ArpWatchdog struct {
 	cfg       *config.ArpWatchConfig
 	notify    *notifier.Notifier
-	ifaceName string // Identidad de la interfaz
+	ifaceName string 
 	mu        sync.Mutex
 
-	// --- Configuración Efectiva (Cargada en Start) ---
+	// Configuración Efectiva
 	limitPPS      uint64
 	scanThreshold int
 	scanLimitPPS  uint64
@@ -42,6 +43,11 @@ type ArpWatchdog struct {
 
 	sources       map[[6]byte]*arpStats
 	alertRegistry map[[6]byte]time.Time
+
+	// --- FASE 2: GARP Detection ---
+	garpStats     map[[6]byte]uint64
+	garpThreshold uint64
+	garpAlerts    map[[6]byte]time.Time
 }
 
 func NewArpWatchdog(cfg *config.ArpWatchConfig, n *notifier.Notifier, ifaceName string) *ArpWatchdog {
@@ -51,51 +57,43 @@ func NewArpWatchdog(cfg *config.ArpWatchConfig, n *notifier.Notifier, ifaceName 
 		ifaceName:     ifaceName,
 		sources:       make(map[[6]byte]*arpStats, 100),
 		alertRegistry: make(map[[6]byte]time.Time),
+		garpStats:     make(map[[6]byte]uint64),
+		garpAlerts:    make(map[[6]byte]time.Time),
 	}
 }
 
 func (aw *ArpWatchdog) Name() string { return "ArpWatchdog" }
 
 func (aw *ArpWatchdog) Start(conn *packet.Conn, iface *net.Interface) error {
-	// 1. Cargar Defaults Globales
+	// 1. Cargar Defaults
 	aw.limitPPS = aw.cfg.MaxPPS
 	aw.scanThreshold = aw.cfg.ScanIPThreshold
 	aw.scanLimitPPS = aw.cfg.ScanModePPS
+	aw.garpThreshold = aw.cfg.GarpThreshold // Nuevo campo Fase 2
 
-	// Parseo de Cooldown Global
 	dur, err := time.ParseDuration(aw.cfg.AlertCooldown)
 	if err != nil {
-		log.Printf("⚠️ [ArpWatch:%s] Invalid AlertCooldown '%s', defaulting to 30s", iface.Name, aw.cfg.AlertCooldown)
 		aw.cooldown = 30 * time.Second
 	} else {
 		aw.cooldown = dur
 	}
 
-	// 2. Aplicar Overrides
+	// 2. Overrides
 	if override, ok := aw.cfg.Overrides[iface.Name]; ok {
-		if override.MaxPPS > 0 {
-			aw.limitPPS = override.MaxPPS
-			log.Printf("🔧 [ArpWatch:%s] Override MaxPPS = %d", iface.Name, aw.limitPPS)
-		}
-		if override.ScanIPThreshold > 0 {
-			aw.scanThreshold = override.ScanIPThreshold
-			log.Printf("🔧 [ArpWatch:%s] Override ScanIPThreshold = %d", iface.Name, aw.scanThreshold)
-		}
-		if override.ScanModePPS > 0 {
-			aw.scanLimitPPS = override.ScanModePPS
-			log.Printf("🔧 [ArpWatch:%s] Override ScanModePPS = %d", iface.Name, aw.scanLimitPPS)
-		}
-		// Nota: ArpWatchOverride no tiene AlertCooldown en config.go fase 1, se mantiene el global.
+		if override.MaxPPS > 0 { aw.limitPPS = override.MaxPPS }
+		if override.ScanIPThreshold > 0 { aw.scanThreshold = override.ScanIPThreshold }
+		if override.ScanModePPS > 0 { aw.scanLimitPPS = override.ScanModePPS }
 	}
 
-	// 3. Fallbacks de Seguridad (Precepto #15: Zero-Value usability)
+	// 3. Fallbacks
 	if aw.limitPPS == 0 { aw.limitPPS = 500 }
 	if aw.scanThreshold == 0 { aw.scanThreshold = 10 }
 	if aw.scanLimitPPS == 0 { aw.scanLimitPPS = 20 }
+	if aw.garpThreshold == 0 { aw.garpThreshold = 50 } // Default GARP threshold
 	if aw.cooldown == 0 { aw.cooldown = 30 * time.Second }
 
-	log.Printf("✅ [ArpWatch:%s] Active. Limit: %d pps (Scan Mode: >%d targets -> %d pps)", 
-		iface.Name, aw.limitPPS, aw.scanThreshold, aw.scanLimitPPS)
+	log.Printf("✅ [ArpWatch:%s] Active. Limit: %d pps, GARP Limit: %d pps", 
+		iface.Name, aw.limitPPS, aw.garpThreshold)
 
 	go func() {
 		ticker := time.NewTicker(1 * time.Second)
@@ -108,9 +106,7 @@ func (aw *ArpWatchdog) Start(conn *packet.Conn, iface *net.Interface) error {
 }
 
 func ipToUint32(ip []byte) uint32 {
-	if len(ip) != 4 {
-		return 0
-	}
+	if len(ip) != 4 { return 0 }
 	return binary.BigEndian.Uint32(ip)
 }
 
@@ -128,127 +124,132 @@ func (aw *ArpWatchdog) OnPacket(data []byte, length int, vlanID uint16) {
 		ethTypeOffset = 16
 	}
 
-	if length < ethOffset+8 { return }
-
+	if length < ethOffset+28 { return }
 	if binary.BigEndian.Uint16(data[ethTypeOffset:ethTypeOffset+2]) != EtherTypeARP { return }
 
 	arpBase := ethOffset
-	if length < arpBase+28 { return }
-
 	opCode := binary.BigEndian.Uint16(data[arpBase+6 : arpBase+8])
-	if opCode != OpCodeRequest { return }
+	
+	// Solo analizamos Requests (1) y Replies (2, para GARP)
+	if opCode != 1 && opCode != 2 { return }
 
-	// ZERO-ALLOC KEY EXTRACTION
 	var srcMacKey [6]byte
 	copy(srcMacKey[:], data[arpBase+8:arpBase+14])
 	
-	targetIPBytes := data[arpBase+24 : arpBase+28]
-	targetIP := ipToUint32(targetIPBytes)
+	senderIP := data[arpBase+14 : arpBase+18]
+	targetIP := data[arpBase+24 : arpBase+28]
+
+	// --- LOGICA GARP (Fase 2) ---
+	// Gratuitous ARP: Sender IP == Target IP
+	isGratuitous := bytes.Equal(senderIP, targetIP)
 
 	aw.mu.Lock()
-	stats, exists := aw.sources[srcMacKey]
+	defer aw.mu.Unlock()
 
-	if !exists {
-		// Protección de memoria
-		if len(aw.sources) > MaxTrackedArpSources {
-			aw.mu.Unlock()
-			return
+	if isGratuitous {
+		aw.garpStats[srcMacKey]++
+		return // GARP se cuenta por separado
+	}
+
+	// --- LOGICA ARP STORM NORMAL (Requests) ---
+	if opCode == OpCodeRequest {
+		stats, exists := aw.sources[srcMacKey]
+		if !exists {
+			if len(aw.sources) > MaxTrackedArpSources { return }
+			stats = &arpStats{
+				targets: make(map[uint32]struct{}, 8),
+				minIP:   ipToUint32(targetIP),
+				maxIP:   ipToUint32(targetIP),
+			}
+			aw.sources[srcMacKey] = stats
 		}
-		stats = &arpStats{
-			targets: make(map[uint32]struct{}, 8),
-			minIP:   targetIP,
-			maxIP:   targetIP,
+
+		stats.pps++
+		tIP := ipToUint32(targetIP)
+		if tIP < stats.minIP { stats.minIP = tIP }
+		if tIP > stats.maxIP { stats.maxIP = tIP }
+		if len(stats.targets) < 255 {
+			stats.targets[tIP] = struct{}{}
 		}
-		aw.sources[srcMacKey] = stats
 	}
-
-	stats.pps++
-	if targetIP < stats.minIP {
-		stats.minIP = targetIP
-	}
-	if targetIP > stats.maxIP {
-		stats.maxIP = targetIP
-	}
-	// Límite hardcodeado de 255 targets para no explotar memoria en un scan masivo /16
-	if len(stats.targets) < 255 {
-		stats.targets[targetIP] = struct{}{}
-	}
-
-	aw.mu.Unlock()
 }
 
 func (aw *ArpWatchdog) analyzeAndReset() {
 	aw.mu.Lock()
 	defer aw.mu.Unlock()
 
-	currentIface := aw.ifaceName
+	// 1. Analizar GARP Storms
+	for mac, count := range aw.garpStats {
+		if count > aw.garpThreshold {
+			lastAlert, alerted := aw.garpAlerts[mac]
+			if !alerted || time.Since(lastAlert) > aw.cooldown {
+				
+				telemetry.EngineHits.WithLabelValues(aw.ifaceName, "ArpWatchdog", "GarpFlood").Inc()
+				
+				capturedMac := net.HardwareAddr(mac[:]).String()
+				capturedCount := count
+				ifaceName := aw.ifaceName // capture for goroutine
 
+				go func(iface, m string, rate, limit uint64) {
+					msg := fmt.Sprintf("[ArpWatchdog] 📢 GRATUITOUS ARP FLOOD!\n"+
+						"    INTERFACE:  %s\n"+
+						"    RATE:       %d pkts/s (Limit: %d)\n"+
+						"    SOURCE:     %s\n"+
+						"    CAUSE:      IP Conflict, VRRP Flapping, or ARP Poisoning attack.",
+						iface, rate, limit, m)
+					aw.notify.Alert(msg)
+				}(ifaceName, capturedMac, capturedCount, aw.garpThreshold)
+
+				aw.garpAlerts[mac] = time.Now()
+			}
+		}
+	}
+	// Reset GARP
+	aw.garpStats = make(map[[6]byte]uint64)
+
+
+	// 2. Analizar ARP Scan / Storm Normal
 	for macArray, stats := range aw.sources {
 		uniqueTargets := len(stats.targets)
-		
-		// USAR VARIABLE DE INSTANCIA
 		isScanning := uniqueTargets > aw.scanThreshold
-
 		threshold := aw.limitPPS
-		
-		if isScanning {
-			// USAR VARIABLE DE INSTANCIA
-			threshold = aw.scanLimitPPS
-		}
+		if isScanning { threshold = aw.scanLimitPPS }
 
 		if stats.pps > threshold {
 			lastAlert, alerted := aw.alertRegistry[macArray]
-			
-			// USAR VARIABLE DE INSTANCIA (Cooldown)
 			if !alerted || time.Since(lastAlert) > aw.cooldown {
 				var pattern, details, metricType string
 
 				if isScanning {
 					pattern = "SUBNET SCANNING (SWEEP)"
 					metricType = "NetworkScan"
-					ipStart := uint32ToIP(stats.minIP)
-					ipEnd := uint32ToIP(stats.maxIP)
-					details = fmt.Sprintf("Scanning Range: %s -> %s (%d IPs)", ipStart, ipEnd, uniqueTargets)
-				} else if uniqueTargets == 1 {
-					pattern = "SINGLE TARGET ATTACK / LOOP"
-					metricType = "SingleTargetLoop"
-					ipTarget := uint32ToIP(stats.minIP)
-					details = fmt.Sprintf("Hammering Target: %s", ipTarget)
+					details = fmt.Sprintf("Scanning Range IPs (%d targets)", uniqueTargets)
 				} else {
-					pattern = "HIGH VOLUME ARP ANOMALY"
+					pattern = "ARP FLOOD"
 					metricType = "ArpNoise"
-					details = fmt.Sprintf("Multiple Targets (%d IPs)", uniqueTargets)
+					details = fmt.Sprintf("High Volume Requests")
 				}
 
 				telemetry.EngineHits.WithLabelValues(aw.ifaceName, "ArpWatchdog", metricType).Inc()
-
+				capturedMac := net.HardwareAddr(macArray[:]).String()
 				capturedPPS := stats.pps
-				capturedMAC := net.HardwareAddr(macArray[:]).String()
+				ifaceName := aw.ifaceName
 
-				go func(iface, m, p, d string, rate uint64, lim uint64) {
-					msg := fmt.Sprintf("[ArpWatchdog] 🐶 DISCOVERY STORM DETECTED!\n"+
+				go func(iface, m, p, d string, rate uint64) {
+					msg := fmt.Sprintf("[ArpWatchdog] 🐶 ARP ANOMALY!\n"+
 						"    INTERFACE:  %s\n"+
-						"    RATE:       %d req/s (Threshold: %d)\n"+
+						"    RATE:       %d req/s\n"+
 						"    SOURCE:     %s\n"+
 						"    PATTERN:    %s\n"+
 						"    DETAILS:    %s",
-						iface, rate, lim, m, p, d)
+						iface, rate, m, p, d)
 					aw.notify.Alert(msg)
-				}(currentIface, capturedMAC, pattern, details, capturedPPS, threshold)
+				}(ifaceName, capturedMac, pattern, details, capturedPPS)
 
 				aw.alertRegistry[macArray] = time.Now()
 			}
 		}
-
-		if len(aw.alertRegistry) > MaxTrackedArpSources {
-			// Limpieza de memoria simple
-			for k, t := range aw.alertRegistry {
-				if time.Since(t) > aw.cooldown*2 {
-					delete(aw.alertRegistry, k)
-				}
-			}
-		}
 	}
-	// Precepto #12: Mapas como caches -> Re-make para evitar fuga de memoria en long-running
+	// Reset ARP Normal
 	aw.sources = make(map[[6]byte]*arpStats, 100)
 }

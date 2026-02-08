@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"strconv"
 	"sync"
 	"time"
 
@@ -83,19 +84,6 @@ func (ap *ActiveProbe) Start(conn *packet.Conn, iface *net.Interface) error {
 	typeBytes := make([]byte, 2)
 	binary.BigEndian.PutUint16(typeBytes, ap.ethertype)
 
-	// --- GENERACIÓN DE PAYLOAD CON IDENTIDAD Y DOMINIO ---
-	// Formato V2: "MAGIC_STRING|nombre_interfaz|dominio"
-	fullPayload := fmt.Sprintf("%s|%s|%s", ap.cfg.MagicPayload, ap.ifaceName, ap.domain)
-	payloadBytes := []byte(fullPayload)
-
-	frame := make([]byte, 0, 14+len(payloadBytes))
-	frame = append(frame, broadcastHW...)
-	frame = append(frame, ap.myMAC...)
-	frame = append(frame, typeBytes...)
-	frame = append(frame, payloadBytes...)
-
-	ap.probeFrame = frame
-
 	log.Printf("✅ [ActiveProbe:%s] Active. EtherType: 0x%X", ap.ifaceName, ap.ethertype)
 
 	go func() {
@@ -103,7 +91,20 @@ func (ap *ActiveProbe) Start(conn *packet.Conn, iface *net.Interface) error {
 		defer ticker.Stop()
 
 		for range ticker.C {
-			_, _ = conn.WriteTo(ap.probeFrame, ap.destAddr)
+			// Regenerar payload con timestamp actual
+			timestamp := time.Now().UnixNano()
+			fullPayload := fmt.Sprintf("%s|%s|%s|%d", ap.cfg.MagicPayload, ap.ifaceName, ap.domain, timestamp)
+			payloadBytes := []byte(fullPayload)
+
+			frame := make([]byte, 0, 14+len(payloadBytes))
+			frame = append(frame, ap.destAddr.HardwareAddr...)
+			frame = append(frame, ap.myMAC...)
+			typeBytes := make([]byte, 2)
+			binary.BigEndian.PutUint16(typeBytes, ap.ethertype)
+			frame = append(frame, typeBytes...)
+			frame = append(frame, payloadBytes...)
+
+			_, _ = conn.WriteTo(frame, ap.destAddr)
 		}
 	}()
 
@@ -160,6 +161,28 @@ func (ap *ActiveProbe) OnPacket(data []byte, length int, vlanID uint16) {
 		remoteDomain = string(parts[2])
 	}
 
+	// RTT Classification
+	var rttInfo string
+	if len(parts) >= 4 {
+		if sentNano, err := strconv.ParseInt(string(parts[3]), 10, 64); err == nil {
+			rttNano := time.Now().UnixNano() - sentNano
+			rttDuration := time.Duration(rttNano)
+			
+			var rttClassification string
+			switch {
+			case rttDuration < 50*time.Microsecond:
+				rttClassification = "SAME RACK (patch cord)"
+			case rttDuration < 500*time.Microsecond:
+				rttClassification = "ACCESS LAYER"
+			case rttDuration < 2*time.Millisecond:
+				rttClassification = "DISTRIBUTION LAYER"
+			default:
+				rttClassification = "CORE / CAMPUS"
+			}
+			rttInfo = fmt.Sprintf("\n    RTT:         %v (%s)", rttDuration, rttClassification)
+		}
+	}
+
 	srcMac := data[6:12]
 	
 	isSelfMac := bytes.Equal(srcMac, ap.myMAC)
@@ -184,9 +207,9 @@ func (ap *ActiveProbe) OnPacket(data []byte, length int, vlanID uint16) {
 		alertType = "HardLoop"
 		alertMsg = fmt.Sprintf("[%s] 🚨 LOOP CONFIRMED! (Self-Loop)\n"+
 			"    INTERFACE: %s\n"+
-			"    STATUS:    Cable connects interface back to itself.\n"+
+			"    STATUS:    Cable connects interface back to itself.%s\n"+
 			"    ACTION:    IMMEDIATE DISCONNECT.%s", 
-			ap.ifaceName, ap.ifaceName, topologyInfo)
+			ap.ifaceName, ap.ifaceName, rttInfo, topologyInfo)
 
 	} else {
 		// Viene de OTRA MAC
@@ -201,9 +224,9 @@ func (ap *ActiveProbe) OnPacket(data []byte, length int, vlanID uint16) {
 			alertMsg = fmt.Sprintf("[%s] ☣️ CRITICAL TOPOLOGY ERROR (Cross-Domain)!\n"+
 				"    INTERFACE: %s (Domain: %s)\n"+
 				"    REMOTE:    %s (Domain: %s)\n"+
-				"    DETECTED:  Physical bridge between two different networks.\n"+
+				"    DETECTED:  Physical bridge between two different networks.%s\n"+
 				"    ACTION:    Check cabling between these two segments immediately.%s", 
-				ap.ifaceName, ap.ifaceName, ap.domain, remoteIface, remoteDomain, topologyInfo)
+				ap.ifaceName, ap.ifaceName, ap.domain, remoteIface, remoteDomain, rttInfo, topologyInfo)
 		}
 	}
 
