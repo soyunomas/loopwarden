@@ -44,13 +44,52 @@ func NewMetaEngine(notify *notifier.Notifier, ifaceName string, store *TopologyS
 	}
 }
 
+// IngestAlert es el puente entre el Notifier y el MetaEngine.
+// Analiza el string de alerta para identificar al emisor.
+func (me *MetaEngine) IngestAlert(msg string) {
+	// Formato esperado de los algoritmos: "[EngineName] Mensaje..."
+	// Parseo rápido y sucio (pero efectivo en el Cold Path)
+	
+	msg = strings.TrimSpace(msg)
+	if !strings.HasPrefix(msg, "[") {
+		return // Mensaje de sistema o mal formado
+	}
+
+	endIndex := strings.Index(msg, "]")
+	if endIndex == -1 || endIndex < 2 {
+		return
+	}
+
+	engineName := msg[1:endIndex]
+	
+	// Ignoramos alertas del propio MetaEngine para evitar bucles infinitos de feedback
+	if engineName == "MetaEngine" || engineName == "System" {
+		return
+	}
+
+	// Determinamos el tipo de amenaza (simplificado)
+	threatType := "Anomaly"
+	if strings.Contains(msg, "LOOP") {
+		threatType = "Loop"
+	} else if strings.Contains(msg, "STORM") || strings.Contains(msg, "FLOOD") {
+		threatType = "Storm"
+	} else if strings.Contains(msg, "ROGUE") {
+		threatType = "Rogue"
+	}
+
+	me.RecordHit(engineName, threatType)
+}
+
 // RecordHit registra que un motor disparó una alerta
 func (me *MetaEngine) RecordHit(engineName string, threatType string) {
 	me.mu.Lock()
 	defer me.mu.Unlock()
 
 	now := time.Now()
-	key := fmt.Sprintf("%s:%s", engineName, threatType)
+	// Usamos solo el engineName como clave para la correlación cross-threat
+	// (Ej: DhcpHunter + MacStorm = Caos generalizado)
+	key := engineName 
+	
 	me.recentHits[key] = append(me.recentHits[key], now)
 
 	// Limpiar hits antiguos
@@ -83,21 +122,13 @@ func (me *MetaEngine) evaluateCorrelation(now time.Time) {
 	}
 
 	// Contar engines únicos que dispararon en la ventana
-	uniqueEngines := make(map[string]bool)
-	var signals []string
-
-	for key := range me.recentHits {
-		parts := strings.SplitN(key, ":", 2)
-		if len(parts) == 2 {
-			engineName := parts[0]
-			if !uniqueEngines[engineName] {
-				uniqueEngines[engineName] = true
-				signals = append(signals, key)
-			}
-		}
+	var firingEngines []string
+	
+	for engineName := range me.recentHits {
+		firingEngines = append(firingEngines, engineName)
 	}
 
-	if len(uniqueEngines) >= me.threshold {
+	if len(firingEngines) >= me.threshold {
 		me.lastCorAlert = now
 
 		// Construir mensaje de alerta
@@ -108,18 +139,20 @@ func (me *MetaEngine) evaluateCorrelation(now time.Time) {
 
 		alertMsg := fmt.Sprintf("[MetaEngine] 🚨 CONFIRMED LOOP - MULTI-SIGNAL DETECTION!\n"+
 			"    INTERFACE:   %s\n"+
-			"    SIGNALS:     %s\n"+
+			"    ENGINES:     %s\n"+
 			"    WINDOW:      %v\n"+
 			"    CONFIDENCE:  HIGH\n"+
 			"    CONNECTED:   %s",
 			me.ifaceName,
-			strings.Join(signals, ", "),
+			strings.Join(firingEngines, " + "),
 			me.window,
 			topologyInfo)
 
 		telemetry.EngineHits.WithLabelValues(me.ifaceName, "MetaEngine", "CorrelatedLoop").Inc()
 
 		log.Printf("%s", alertMsg)
+		// IMPORTANTE: Llamamos a notify directamente. El IngestAlert tiene un filtro
+		// para ignorar "MetaEngine" y evitar bucles.
 		go me.notify.Alert(alertMsg)
 	}
 }

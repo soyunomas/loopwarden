@@ -34,9 +34,23 @@ func NewEngine(cfg *config.AlgorithmConfig, notify *notifier.Notifier, ifaceName
 		algorithms: make([]Algorithm, 0),
 	}
 
+	// Meta-Engine (Correlación)
+	// LO INICIALIZAMOS PRIMERO PARA PODER REGISTRARLO
+	if cfg.MetaEngine.Enabled {
+		window, _ := time.ParseDuration(cfg.MetaEngine.Window)
+		cooldown, _ := time.ParseDuration(cfg.MetaEngine.Cooldown)
+		e.metaEngine = NewMetaEngine(notify, ifaceName, store, window, cfg.MetaEngine.Threshold, cooldown)
+		
+		// --- FIX CRÍTICO: CONEXIÓN DE CABLES ---
+		// Registramos el MetaEngine como suscriptor del Notifier.
+		// Ahora, cada vez que ActiveProbe o MacStorm manden una alerta, 
+		// el Notifier la pasará también a e.metaEngine.IngestAlert
+		notify.Subscribe(e.metaEngine.IngestAlert)
+		log.Printf("🧠 [Engine:%s] MetaEngine wired to Notifier stream", ifaceName)
+	}
+
 	// 0. Neighbor Discovery (Passive, Always On preferrably)
 	if cfg.NeighborDiscovery.Enabled {
-		// FIX: Ahora pasamos 'notify' porque NeighborDiscovery puede alertar (N1 Feature)
 		e.algorithms = append(e.algorithms, NewNeighborDiscovery(store, ifaceName, notify))
 	} else {
 		log.Printf("ℹ️  [Engine:%s] Neighbor Discovery DISABLED", ifaceName)
@@ -98,23 +112,11 @@ func NewEngine(cfg *config.AlgorithmConfig, notify *notifier.Notifier, ifaceName
 		log.Printf("✅ [Engine:%s] VlanLeak detector loaded", ifaceName)
 	}
 
-	// Meta-Engine (Correlación)
-	if cfg.MetaEngine.Enabled {
-		window, _ := time.ParseDuration(cfg.MetaEngine.Window)
-		cooldown, _ := time.ParseDuration(cfg.MetaEngine.Cooldown)
-		e.metaEngine = NewMetaEngine(notify, ifaceName, store, window, cfg.MetaEngine.Threshold, cooldown)
-	}
-
 	log.Printf("✅ [Engine:%s] Initialized with %d algorithms", ifaceName, len(e.algorithms))
 	return e
 }
 
-func (e *Engine) RecordHit(engineName string, threatType string) {
-	if e.metaEngine != nil {
-		e.metaEngine.RecordHit(engineName, threatType)
-	}
-}
-
+// StartAll inicia todos los algoritmos registrados.
 func (e *Engine) StartAll(conn *packet.Conn, iface *net.Interface) {
 	for _, algo := range e.algorithms {
 		if err := algo.Start(conn, iface); err != nil {
@@ -123,6 +125,14 @@ func (e *Engine) StartAll(conn *packet.Conn, iface *net.Interface) {
 	}
 }
 
+// RecordHit registra un evento directamente (usado por Legacy/Internal calls)
+func (e *Engine) RecordHit(engineName string, threatType string) {
+	if e.metaEngine != nil {
+		e.metaEngine.RecordHit(engineName, threatType)
+	}
+}
+
+// DispatchPacket reparte el paquete a todos los algoritmos activos.
 func (e *Engine) DispatchPacket(data []byte, length int, vlanID uint16) {
 	e.mu.RLock()
 	// Optimización: Inlining manual del loop caliente
