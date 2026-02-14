@@ -53,17 +53,16 @@
         font-style: italic;
     }
 
-    /* --- GRID RESPONSIVA (EL CAMBIO CLAVE) --- */
+    /* --- GRID RESPONSIVA (CORREGIDO PARA EVITAR ESTIRAMIENTO) --- */
     .grid {
         display: grid;
         /* 
-           REGLA 13 & 42 (KISS): 
-           En lugar de forzar 12 columnas, usamos auto-fit con minmax.
-           - Pantallas grandes: Cabrán ~12 tarjetas.
-           - Pantallas pequeñas: Se reducirán a 1 o 2 columnas automáticamente.
-           - 140px es el ancho mínimo para que la info se lea bien.
+           CAMBIO REALIZADO:
+           Se cambia 'auto-fit' por 'auto-fill'.
+           auto-fill: Reserva el espacio de las columnas aunque estén vacías.
+           Esto evita que una sola tarjeta se estire ocupando todo el ancho.
         */
-        grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); 
+        grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); 
         gap: 8px;
     }
 
