@@ -11,6 +11,19 @@ import (
 	"github.com/soyunomas/loopwarden/internal/telemetry"
 )
 
+// Combinaciones de engines que confirman un bucle real.
+// Si TODOS los engines de algún grupo están presentes → CONFIRMED LOOP.
+// Si no → se reporta como CORRELATED ANOMALY (sin gritar "LOOP").
+var loopSignatures = [][]string{
+	{"ActiveProbe", "EtherFuse"},
+	{"ActiveProbe", "MacStorm"},
+	{"ActiveProbe", "FlapGuard"},
+	{"EtherFuse", "MacStorm"},
+	{"EtherFuse", "FlapGuard"},
+	{"EtherFuse", "McastPolicer"},
+	{"ActiveProbe", "EtherFuse", "MacStorm"},
+}
+
 type MetaEngine struct {
 	mu           sync.Mutex
 	recentHits   map[string][]time.Time // engine_name -> timestamps
@@ -116,6 +129,27 @@ func (me *MetaEngine) pruneOldHits(now time.Time) {
 	}
 }
 
+// matchesLoopSignature comprueba si los engines activos coinciden con alguna firma de bucle conocida.
+func matchesLoopSignature(firingEngines []string) bool {
+	active := make(map[string]struct{}, len(firingEngines))
+	for _, e := range firingEngines {
+		active[e] = struct{}{}
+	}
+	for _, sig := range loopSignatures {
+		matched := true
+		for _, required := range sig {
+			if _, ok := active[required]; !ok {
+				matched = false
+				break
+			}
+		}
+		if matched {
+			return true
+		}
+	}
+	return false
+}
+
 func (me *MetaEngine) evaluateCorrelation(now time.Time) {
 	if now.Sub(me.lastCorAlert) < me.cooldown {
 		return
@@ -128,16 +162,25 @@ func (me *MetaEngine) evaluateCorrelation(now time.Time) {
 		firingEngines = append(firingEngines, engineName)
 	}
 
-	if len(firingEngines) >= me.threshold {
-		me.lastCorAlert = now
+	if len(firingEngines) < me.threshold {
+		return
+	}
 
-		// Construir mensaje de alerta
-		topologyInfo := "Unknown (No LLDP/CDP detected)"
-		if neighbor, found := me.store.Get(me.ifaceName); found {
-			topologyInfo = neighbor.String()
-		}
+	me.lastCorAlert = now
 
-		alertMsg := fmt.Sprintf("[MetaEngine] 🚨 CONFIRMED LOOP - MULTI-SIGNAL DETECTION!\n"+
+	topologyInfo := "Unknown (No LLDP/CDP detected)"
+	if neighbor, found := me.store.Get(me.ifaceName); found {
+		topologyInfo = neighbor.String()
+	}
+
+	isLoop := matchesLoopSignature(firingEngines)
+
+	var alertMsg string
+	var metricType string
+
+	if isLoop {
+		metricType = "CorrelatedLoop"
+		alertMsg = fmt.Sprintf("[MetaEngine] 🚨 CONFIRMED LOOP - MULTI-SIGNAL DETECTION!\n"+
 			"    INTERFACE:   %s\n"+
 			"    ENGINES:     %s\n"+
 			"    WINDOW:      %v\n"+
@@ -147,12 +190,23 @@ func (me *MetaEngine) evaluateCorrelation(now time.Time) {
 			strings.Join(firingEngines, " + "),
 			me.window,
 			topologyInfo)
-
-		telemetry.EngineHits.WithLabelValues(me.ifaceName, "MetaEngine", "CorrelatedLoop").Inc()
-
-		log.Printf("%s", alertMsg)
-		// IMPORTANTE: Llamamos a notify directamente. El IngestAlert tiene un filtro
-		// para ignorar "MetaEngine" y evitar bucles.
-		go me.notify.Alert(alertMsg)
+	} else {
+		metricType = "CorrelatedAnomaly"
+		alertMsg = fmt.Sprintf("[MetaEngine] ⚠️ CORRELATED ANOMALY (not a loop)\n"+
+			"    INTERFACE:   %s\n"+
+			"    ENGINES:     %s\n"+
+			"    WINDOW:      %v\n"+
+			"    CONFIDENCE:  LOW\n"+
+			"    CONNECTED:   %s\n"+
+			"    NOTE:        Likely legitimate traffic (scan, migration, etc.)",
+			me.ifaceName,
+			strings.Join(firingEngines, " + "),
+			me.window,
+			topologyInfo)
 	}
+
+	telemetry.EngineHits.WithLabelValues(me.ifaceName, "MetaEngine", metricType).Inc()
+
+	log.Printf("%s", alertMsg)
+	go me.notify.Alert(alertMsg)
 }

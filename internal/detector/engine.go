@@ -9,6 +9,7 @@ import (
 	"github.com/mdlayher/packet"
 	"github.com/soyunomas/loopwarden/internal/config"
 	"github.com/soyunomas/loopwarden/internal/notifier"
+	"github.com/soyunomas/loopwarden/internal/telemetry"
 )
 
 type Algorithm interface {
@@ -113,6 +114,12 @@ func NewEngine(cfg *config.AlgorithmConfig, notify *notifier.Notifier, ifaceName
 	}
 
 	log.Printf("✅ [Engine:%s] Initialized with %d algorithms", ifaceName, len(e.algorithms))
+
+	// Pre-inicializar engine_errors_total a 0 para que siempre aparezca en Prometheus
+	for _, algo := range e.algorithms {
+		telemetry.EngineErrors.WithLabelValues(ifaceName, algo.Name())
+	}
+
 	return e
 }
 
@@ -135,9 +142,19 @@ func (e *Engine) RecordHit(engineName string, threatType string) {
 // DispatchPacket reparte el paquete a todos los algoritmos activos.
 func (e *Engine) DispatchPacket(data []byte, length int, vlanID uint16) {
 	e.mu.RLock()
-	// Optimización: Inlining manual del loop caliente
 	for _, algo := range e.algorithms {
-		algo.OnPacket(data, length, vlanID)
+		e.safeOnPacket(algo, data, length, vlanID)
 	}
 	e.mu.RUnlock()
+}
+
+// safeOnPacket ejecuta OnPacket con recover para capturar panics por engine.
+func (e *Engine) safeOnPacket(algo Algorithm, data []byte, length int, vlanID uint16) {
+	defer func() {
+		if r := recover(); r != nil {
+			telemetry.EngineErrors.WithLabelValues(e.ifaceName, algo.Name()).Inc()
+			log.Printf("❌ [%s] PANIC in engine %s: %v", e.ifaceName, algo.Name(), r)
+		}
+	}()
+	algo.OnPacket(data, length, vlanID)
 }

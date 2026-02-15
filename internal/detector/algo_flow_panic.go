@@ -56,6 +56,8 @@ func (fp *FlowPanic) Start(conn *packet.Conn, iface *net.Interface) error {
 			log.Printf("🔧 [FlowPanic] Override applied for %s: MaxPausePPS = %d", iface.Name, fp.maxPausePPS)
 		}
 	}
+
+	log.Printf("✅ [FlowPanic:%s] Active. Limit: %d pause frames/s", iface.Name, fp.maxPausePPS)
 	return nil
 }
 

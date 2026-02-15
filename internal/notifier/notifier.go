@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/soyunomas/loopwarden/internal/config"
+	"github.com/soyunomas/loopwarden/internal/telemetry"
 )
 
 const alertBufferSize = 100
@@ -147,8 +148,9 @@ func (n *Notifier) dispatch(msg string) {
 	select {
 	case n.alertChan <- msg:
 	default:
-		// Drop silencioso si el canal interno está lleno
+		telemetry.NotifierDropped.Inc()
 	}
+	telemetry.NotifierBacklog.Set(float64(len(n.alertChan)))
 }
 
 func (n *Notifier) worker() {

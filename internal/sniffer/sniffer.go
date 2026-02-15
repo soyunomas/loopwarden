@@ -7,6 +7,7 @@ import (
 	"log"
 	"net"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/mdlayher/packet"
@@ -70,16 +71,26 @@ func Run(ctx context.Context, ifaceName string, cfg *config.Config, engine *dete
 
 	log.Printf("🛡️  Sniffer active on %s [BPF: Multicast+Broadcast]", ifaceName)
 
-	// --- 1. MONITOR DE DROPS ---
+	// Pre-inicializar app_drops_total a 0 para que siempre aparezca en Prometheus
+	telemetry.AppDrops.WithLabelValues(ifaceName, "read_error")
+
+	// --- 1. MONITOR DE DROPS + PPS ---
+	var ppsCounter uint64
 	go func() {
 		ticker := time.NewTicker(5 * time.Second)
 		defer ticker.Stop()
 		var lastDrops uint32 = 0
 
+		ppsTicker := time.NewTicker(1 * time.Second)
+		defer ppsTicker.Stop()
+
 		for {
 			select {
 			case <-ctx.Done():
 				return
+			case <-ppsTicker.C:
+				count := atomic.SwapUint64(&ppsCounter, 0)
+				telemetry.RxPPS.WithLabelValues(ifaceName).Set(float64(count))
 			case <-ticker.C:
 				stats, err := conn.Stats()
 				if err == nil {
@@ -121,9 +132,12 @@ func Run(ctx context.Context, ifaceName string, cfg *config.Config, engine *dete
 					continue
 				}
 			}
+			telemetry.AppDrops.WithLabelValues(ifaceName, "read_error").Inc()
 			log.Printf("⚠️ [%s] Read error: %v", ifaceName, err)
 			continue
 		}
+
+		atomic.AddUint64(&ppsCounter, 1)
 
 		// --- PROCESAMIENTO ---
 		start := time.Now()
@@ -142,5 +156,6 @@ func Run(ctx context.Context, ifaceName string, cfg *config.Config, engine *dete
 
 		duration := time.Since(start).Nanoseconds()
 		telemetry.ProcessingTime.WithLabelValues(ifaceName).Observe(float64(duration))
+		telemetry.ProcessingLatency.WithLabelValues(ifaceName).Observe(float64(duration))
 	}
 }

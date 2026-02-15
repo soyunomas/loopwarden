@@ -19,6 +19,7 @@ import (
 	"github.com/soyunomas/loopwarden/internal/detector"
 	"github.com/soyunomas/loopwarden/internal/notifier"
 	"github.com/soyunomas/loopwarden/internal/sniffer"
+	"github.com/soyunomas/loopwarden/internal/telemetry"
 )
 
 func main() {
@@ -95,6 +96,8 @@ func main() {
 	}
 
 	// 4. Telemetría y API de Topología
+	telemetry.StartMemoryCollector(10 * time.Second)
+
 	if cfg.Telemetry.Enabled {
 		go func() {
 			addr := cfg.Telemetry.ListenAddress

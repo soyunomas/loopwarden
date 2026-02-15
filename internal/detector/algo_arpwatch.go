@@ -23,10 +23,11 @@ const (
 )
 
 type arpStats struct {
-	pps     uint64
-	minIP   uint32
-	maxIP   uint32
-	targets map[uint32]struct{}
+	pps      uint64
+	senderIP uint32
+	minIP    uint32
+	maxIP    uint32
+	targets  map[uint32]struct{}
 }
 
 type ArpWatchdog struct {
@@ -157,12 +158,14 @@ func (aw *ArpWatchdog) OnPacket(data []byte, length int, vlanID uint16) {
 		if !exists {
 			if len(aw.sources) > MaxTrackedArpSources { return }
 			stats = &arpStats{
-				targets: make(map[uint32]struct{}, 8),
-				minIP:   ipToUint32(targetIP),
-				maxIP:   ipToUint32(targetIP),
+				senderIP: ipToUint32(senderIP),
+				targets:  make(map[uint32]struct{}, 8),
+				minIP:    ipToUint32(targetIP),
+				maxIP:    ipToUint32(targetIP),
 			}
 			aw.sources[srcMacKey] = stats
 		}
+		stats.senderIP = ipToUint32(senderIP)
 
 		stats.pps++
 		tIP := ipToUint32(targetIP)
@@ -223,28 +226,36 @@ func (aw *ArpWatchdog) analyzeAndReset() {
 				if isScanning {
 					pattern = "SUBNET SCANNING (SWEEP)"
 					metricType = "NetworkScan"
-					details = fmt.Sprintf("Scanning Range IPs (%d targets)", uniqueTargets)
+					details = fmt.Sprintf("Scanning %d targets (%s → %s)",
+						uniqueTargets, uint32ToIP(stats.minIP), uint32ToIP(stats.maxIP))
+				} else if uniqueTargets <= 1 {
+					pattern = "SINGLE TARGET ATTACK / LOOP"
+					metricType = "SingleTarget"
+					details = fmt.Sprintf("Flooding target %s (%d req/s)",
+						uint32ToIP(stats.minIP), stats.pps)
 				} else {
 					pattern = "ARP FLOOD"
 					metricType = "ArpNoise"
-					details = fmt.Sprintf("High Volume Requests")
+					details = fmt.Sprintf("High Volume Requests to %d IPs (%s → %s)",
+						uniqueTargets, uint32ToIP(stats.minIP), uint32ToIP(stats.maxIP))
 				}
 
 				telemetry.EngineHits.WithLabelValues(aw.ifaceName, "ArpWatchdog", metricType).Inc()
 				capturedMac := net.HardwareAddr(macArray[:]).String()
+				capturedSrcIP := uint32ToIP(stats.senderIP).String()
 				capturedPPS := stats.pps
 				ifaceName := aw.ifaceName
 
-				go func(iface, m, p, d string, rate uint64) {
+				go func(iface, m, srcIP, p, d string, rate uint64) {
 					msg := fmt.Sprintf("[ArpWatchdog] 🐶 ARP ANOMALY!\n"+
 						"    INTERFACE:  %s\n"+
 						"    RATE:       %d req/s\n"+
-						"    SOURCE:     %s\n"+
+						"    SOURCE:     %s (%s)\n"+
 						"    PATTERN:    %s\n"+
 						"    DETAILS:    %s",
-						iface, rate, m, p, d)
+						iface, rate, m, srcIP, p, d)
 					aw.notify.Alert(msg)
-				}(ifaceName, capturedMac, pattern, details, capturedPPS)
+				}(ifaceName, capturedMac, capturedSrcIP, pattern, details, capturedPPS)
 
 				aw.alertRegistry[macArray] = time.Now()
 			}
