@@ -11,7 +11,7 @@ log_file = "loopwarden.log"
 
 [network]
 # LoopWarden levantará un motor de detección independiente para cada interfaz listada.
-interfaces = ["eno1", "eno2", "vlan10"] 
+interfaces = ["eno1", "eno2", "vlan10"]
 
 # Longitud de captura (SnapShot Length). 2048 bytes es suficiente para cabeceras + payload.
 snaplen = 2048
@@ -47,6 +47,13 @@ token = ""
 chat_id = ""
 
 [algorithms]
+
+    # --- ALGORITMO 0: Neighbor Discovery (LLDP/CDP) ---
+    # Escucha pasiva para identificar el switch y puerto upstream.
+    # CRÍTICO: Permite que LoopWarden diga "El bucle está en el puerto Gi1/0/1 del Switch X".
+    [algorithms.neighbor_discovery]
+    enabled = true
+
 
     # --- ALGORITMO 1: EtherFuse ---
     [algorithms.etherfuse]
@@ -111,6 +118,22 @@ chat_id = ""
     [algorithms.mcast_policer]
     enabled = true
     max_pps = 8000
+
+    # --- ALGORITMO 10: BcastRatio ---
+    # Alerta temprana cuando el ratio broadcast/total supera un umbral
+    [algorithms.bcast_ratio]
+    enabled = true
+    max_ratio = 0.7           # 70% - porcentaje máximo de broadcast permitido
+    min_sample_size = 100     # Mínimo de paquetes por segundo para evaluar
+    alert_cooldown = "30s"
+
+    # --- META-ENGINE: Correlación Multi-Motor ---
+    # Eleva severidad a CONFIRMED cuando 2+ motores disparan en ventana <2s
+    [algorithms.meta_engine]
+    enabled = true
+    window = "2s"
+    threshold = 2
+    cooldown = "30s"
 
 # --- OVERRIDES: EJEMPLO DE CONFIGURACIÓN POR INTERFAZ ---
 # Aquí es donde configuras los dominios correctos para cada VLAN.

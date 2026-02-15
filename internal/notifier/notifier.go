@@ -12,9 +12,13 @@ import (
 	"time"
 
 	"github.com/soyunomas/loopwarden/internal/config"
+	"github.com/soyunomas/loopwarden/internal/telemetry"
 )
 
 const alertBufferSize = 100
+
+// ObserverFunc define la firma para los "espías" de alertas (e.g. MetaEngine)
+type ObserverFunc func(msg string)
 
 type Notifier struct {
 	cfg        *config.AlertsConfig
@@ -32,6 +36,10 @@ type Notifier struct {
 	isMuted       bool
 	mutedUntil    time.Time
 	droppedAlerts int
+
+	// --- NUEVO: Observers (Event Bus) ---
+	observers   []ObserverFunc
+	observersMu sync.RWMutex
 }
 
 func NewNotifier(cfg *config.AlertsConfig, sensorName string) *Notifier {
@@ -40,9 +48,10 @@ func NewNotifier(cfg *config.AlertsConfig, sensorName string) *Notifier {
 		sensorName: sensorName,
 		alertChan:  make(chan string, alertBufferSize),
 		client: &http.Client{
-			Timeout: 5 * time.Second,
+			Timeout: 10 * time.Second, // AUMENTADO: De 5s a 10s para evitar timeouts en Telegram
 		},
 		windowStart: time.Now(),
+		observers:   make([]ObserverFunc, 0),
 	}
 
 	// 1. Cargar Configuración de Dampening
@@ -56,7 +65,7 @@ func NewNotifier(cfg *config.AlertsConfig, sensorName string) *Notifier {
 		n.muteDuration = dur
 	}
 
-	// 2. Fallbacks de Seguridad (Precepto #15)
+	// 2. Fallbacks de Seguridad
 	if n.maxAlertsPerMin <= 0 {
 		n.maxAlertsPerMin = 20
 	}
@@ -70,7 +79,23 @@ func NewNotifier(cfg *config.AlertsConfig, sensorName string) *Notifier {
 	return n
 }
 
+// Subscribe permite a componentes externos (MetaEngine) escuchar alertas
+func (n *Notifier) Subscribe(fn ObserverFunc) {
+	n.observersMu.Lock()
+	defer n.observersMu.Unlock()
+	n.observers = append(n.observers, fn)
+}
+
 func (n *Notifier) Alert(msg string) {
+	// --- NUEVO: Notificar a los observers ANTES del rate-limit ---
+	// Queremos que el MetaEngine se entere incluso si silenciamos el output externo.
+	n.observersMu.RLock()
+	for _, fn := range n.observers {
+		// Lanzamos en goroutine para no bloquear el flujo de detección
+		go fn(msg)
+	}
+	n.observersMu.RUnlock()
+
 	// Precepto #8: String Concatenation.
 	taggedMsg := fmt.Sprintf("[%s] %s", n.sensorName, msg)
 
@@ -104,10 +129,9 @@ func (n *Notifier) Alert(msg string) {
 
 	n.alertCount++
 
-	// Usamos variable de instancia configurada
 	if n.alertCount > n.maxAlertsPerMin {
 		n.isMuted = true
-		n.mutedUntil = now.Add(n.muteDuration) // Usamos variable de instancia
+		n.mutedUntil = now.Add(n.muteDuration)
 		
 		warning := fmt.Sprintf("[%s] ⛔ [System] FLOOD PROTECTION. Silencing for %v...", n.sensorName, n.muteDuration)
 		n.mu.Unlock()
@@ -124,24 +148,33 @@ func (n *Notifier) dispatch(msg string) {
 	select {
 	case n.alertChan <- msg:
 	default:
-		// Drop silencioso si el canal interno está lleno (Backpressure extremo)
+		telemetry.NotifierDropped.Inc()
 	}
+	telemetry.NotifierBacklog.Set(float64(len(n.alertChan)))
 }
 
 func (n *Notifier) worker() {
 	for msg := range n.alertChan {
+		// Paralelizamos envíos para evitar que un Telegram lento bloquee al resto
+		var wg sync.WaitGroup
+
 		if n.cfg.Webhook.Enabled {
-			n.sendWebhook(msg)
+			wg.Add(1)
+			go func(m string) { defer wg.Done(); n.sendWebhook(m) }(msg)
 		}
 		if n.cfg.SyslogServer != "" {
-			n.sendSyslog(msg)
+			wg.Add(1)
+			go func(m string) { defer wg.Done(); n.sendSyslog(m) }(msg)
 		}
 		if n.cfg.Smtp.Enabled {
-			n.sendEmail(msg)
+			wg.Add(1)
+			go func(m string) { defer wg.Done(); n.sendEmail(m) }(msg)
 		}
 		if n.cfg.Telegram.Enabled {
-			n.sendTelegram(msg)
+			wg.Add(1)
+			go func(m string) { defer wg.Done(); n.sendTelegram(m) }(msg)
 		}
+		wg.Wait()
 	}
 }
 

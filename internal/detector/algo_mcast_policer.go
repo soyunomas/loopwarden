@@ -49,6 +49,8 @@ func (mp *McastPolicer) Start(conn *packet.Conn, iface *net.Interface) error {
 			log.Printf("🔧 [McastPolicer] Override applied for %s: MaxPPS = %d", iface.Name, mp.maxPPS)
 		}
 	}
+
+	log.Printf("✅ [McastPolicer:%s] Active. Limit: %d pps", iface.Name, mp.maxPPS)
 	return nil
 }
 

@@ -1,20 +1,20 @@
 # 🛡️ LoopWarden
 
-![Go Version](https://img.shields.io/badge/go-1.21%2B-blue)
+![Go Version](https://img.shields.io/badge/go-1.25%2B-blue)
 ![Platform](https://img.shields.io/badge/platform-linux-lightgrey)
 ![License](https://img.shields.io/badge/license-MIT-green)
-![Performance](https://img.shields.io/badge/performance-10Gbps%20Ready-brightgreen)
+![Performance](https://img.shields.io/badge/performance-High%20Performance-brightgreen)
 
 **LoopWarden** es un Detector de Bucles Ethernet (L2 Loop Detector) de alto rendimiento. Monitoriza la red en tiempo real para alertar sobre bucles físicos y tormentas de broadcast en milisegundos, reduciendo drásticamente el tiempo de diagnóstico (MTTR).
 
 ## 🚀 Características Principales
 
-LoopWarden ejecuta **9 motores de detección concurrentes**. Cada uno busca una "firma" específica de fallo o amenaza en la red, proporcionando una visibilidad completa de Capa 2:
+LoopWarden ejecuta **13 motores de detección concurrentes**. Cada uno busca una "firma" específica de fallo o amenaza en la red, proporcionando una visibilidad completa de Capa 2:
 
 ### 1. ActiveProbe (Inyección Activa Determinista) ⚡
 *El "Sonar" de la red. La única forma de tener certeza.*
 
-*   **🔬 Mecánica:** LoopWarden genera e inyecta una trama Ethernet unicast (Broadcast `FF:FF...`) con un EtherType `0xFFFF` configurable. El payload contiene una firma mágica, la identidad de la interfaz y un **Dominio de Red** (Domain ID).
+*   **🔬 Mecánica:** LoopWarden genera e inyecta una trama Ethernet broadcast (`FF:FF:FF:FF:FF:FF`) con un EtherType `0xFFFF` configurable. El payload contiene una firma mágica, la identidad de la interfaz y un **Dominio de Red** (Domain ID).
 *   **🛡️ Lógica de Detección (Topology Awareness):**
     *   **Auto-Bucle (Hard Loop):** Si la sonda regresa con la **misma MAC de origen**, es un bucle físico en el propio puerto. (Alerta Crítica).
     *   **Vecino Legítimo:** Si la sonda viene de otra MAC pero tiene el **mismo Dominio** (ej: ambos son "VLAN10"), se considera otro sensor LoopWarden conviviendo en la misma red. (Silencio).
@@ -27,7 +27,7 @@ LoopWarden ejecuta **9 motores de detección concurrentes**. Cada uno busca una 
 
 
 ### 2. EtherFuse (Análisis Pasivo de Payload) 🧬
-*Detección de "rebotes" mediante huella digital criptográfica.*
+*Detección de "rebotes" mediante huella digital de hash rápido.*
 
 *   **🔬 Mecánica:** Inspecciona pasivamente el tráfico Broadcast/Multicast entrante. Calcula un hash ultrarrápido (FNV-1a) del contenido (payload) de la trama. Almacena estos hashes en un buffer circular.
 *   **🛡️ Lógica de Detección:** Si el sistema observa el mismo hash `N` veces en una ventana de tiempo de milisegundos, significa que la trama está "orbitando" la red infinitamente.
@@ -68,6 +68,7 @@ LoopWarden ejecuta **9 motores de detección concurrentes**. Cada uno busca una 
     *   ✅ **Escaneos de Red (Discovery):** Barridos secuenciales de IPs (`nmap`, `arp-scan`). El log mostrará `SUBNET SCANNING`.
     *   ✅ **Bucles de Red:** El mismo paquete ARP repitiéndose infinitamente hacia una sola IP. El log mostrará `SINGLE TARGET ATTACK`.
     *   ✅ **Virus/Malware:** Propagación lateral de gusanos intentando descubrir víctimas en la subred.
+    *   ✅ **Gratuitous ARP Flood:** Inundación de paquetes GARP (Sender IP == Target IP) indicativos de conflictos IP, flapping VRRP/HSRP o ataques de ARP Poisoning.
 
 ### 6. DhcpHunter (Cazador de Rogue DHCP) 🦈
 *Seguridad contra Man-in-the-Middle.*
@@ -106,7 +107,39 @@ LoopWarden ejecuta **9 motores de detección concurrentes**. Cada uno busca una 
     *   ✅ **Tormentas de Clonación:** Software como FOG/Clonezilla mal configurado.
     *   ✅ **Fugas de Vídeo:** Cámaras IP o IPTV inundando puertos de acceso.
     
-### 10. Multi-Stack Granular Tuning 🎛️
+### 10. BcastRatio (Ratio Broadcast vs Total) 📊
+*Alerta temprana de degradación de red.*
+
+*   **🔬 Mecánica:** Cuenta atómicamente todos los paquetes recibidos y los que son broadcast puro (`FF:FF:FF:FF:FF:FF`). Cada segundo calcula el porcentaje de broadcast sobre el total.
+*   **🛡️ Lógica de Detección:** Si el ratio supera el umbral configurado (`max_ratio`, default 70%) con un mínimo de muestra (`min_sample_size`, default 100 pkts/s), genera una alerta de degradación.
+*   **💡 Valor Diferencial:** Detecta la **formación** de una tormenta antes de que sea catastrófica. Un ratio broadcast del 80% indica que la red está al borde del colapso incluso si el PPS absoluto no ha disparado otros motores.
+*   **🎯 Qué detecta:**
+    *   ✅ **Tormentas Incipientes:** Bucles lentos que aún no generan suficiente PPS para EtherFuse pero ya degradan la red.
+    *   ✅ **Degradación Gradual:** Redes donde el broadcast crece lentamente por acumulación de dispositivos mal configurados.
+
+### 11. VlanLeak (Detector de Fugas entre VLANs) ☣️
+*Vigilancia de aislamiento de segmentos de red.*
+
+*   **🔬 Mecánica:** Rastrea qué VLANs visita cada MAC de origen. Mantiene un mapa `MAC → {VLAN → última vez vista}` y lo compara contra una lista de **pares de VLANs prohibidos** definidos en la configuración.
+*   **🛡️ Lógica de Detección:** Si una misma MAC aparece en dos VLANs que están marcadas como prohibidas (ej: VLAN 10 de Servidores y VLAN 200 de Invitados), se genera una alerta inmediata de fuga de segmentación.
+*   **💡 Valor Diferencial:** Mientras *FlapGuard* detecta cambios rápidos de VLAN (flapping), *VlanLeak* detecta tráfico que **nunca debería cruzar** entre segmentos, independientemente de la velocidad. Ideal para auditorías de cumplimiento (PCI-DSS, ISO 27001).
+*   **🎯 Qué detecta:**
+    *   ✅ **Fugas de Segmentación:** Tráfico de la VLAN de gestión apareciendo en la VLAN de invitados.
+    *   ✅ **Errores de Trunk:** Puertos trunk permitiendo VLANs que no deberían.
+    *   ✅ **Violaciones de Política:** Dispositivos accediendo a segmentos prohibidos por la política de red.
+
+### 12. MetaEngine (Correlador Multi-Motor) 🧠
+*Confirmación de alta confianza mediante correlación cruzada.*
+
+*   **🔬 Mecánica:** Se suscribe al flujo de alertas del Notifier. Cada vez que un motor genera una alerta, el MetaEngine registra el evento con su timestamp. Mantiene una ventana deslizante de tiempo configurable.
+*   **🛡️ Lógica de Detección:** Si **2 o más motores distintos** disparan alertas dentro de la misma ventana de tiempo (default: 2 segundos), el MetaEngine eleva la severidad a `CONFIRMED LOOP - MULTI-SIGNAL DETECTION`. Ejemplo: si *ActiveProbe* detecta un self-loop y *EtherFuse* detecta payloads repetidos simultáneamente, la confianza es máxima.
+*   **💡 Valor Diferencial:** Reduce drásticamente los falsos positivos. Una alerta individual podría ser ruido, pero dos motores independientes confirmando el mismo evento en la misma ventana temporal es casi certeza absoluta.
+*   **🎯 Qué detecta:**
+    *   ✅ **Bucles Confirmados:** Correlación entre detección activa y pasiva.
+    *   ✅ **Ataques Coordinados:** Múltiples anomalías simultáneas (DHCP Rogue + MAC Flood).
+    *   ✅ **Fallos en Cascada:** Problemas de infraestructura que disparan múltiples alarmas.
+
+### 13. Multi-Stack Granular Tuning 🎛️
 *Configuración jerárquica por interfaz.*
 
 *   **🔬 Mecánica:** LoopWarden permite definir una política global de seguridad y aplicar **excepciones específicas** (Overrides) por interfaz.
@@ -115,20 +148,63 @@ LoopWarden ejecuta **9 motores de detección concurrentes**. Cada uno busca una 
     *   **Local:** Relaja o endurece las reglas para puertos específicos (ej: "La interfaz `vlan_guest` puede hacer más peticiones ARP, pero `mgmt` tiene tolerancia cero").
 *   **💡 Valor Diferencial:** Permite desplegar una sola instancia de LoopWarden para monitorizar entornos heterogéneos (Servidores, IoT, Usuarios, Wi-Fi) sin generar falsos positivos en las zonas ruidosas.
 
+#### 14. Neighbor Discovery (Conciencia de Topología) 🗺️
+*Contexto físico para cada alerta.*
+
+*   **🔬 Mecánica:** Un motor pasivo que decodifica tramas **LLDP** (Link Layer Discovery Protocol) y **CDP** (Cisco Discovery Protocol) en tiempo real. Extrae el Nombre del Sistema, Puerto, Chasis ID y **Dirección IP de Gestión** del switch vecino.
+*   **🛡️ Lógica:** No genera alertas por sí mismo. Su función es mantener un "Mapa de Vecinos" en memoria (`TopologyStore`). Cuando otro motor (ej: *EtherFuse*) detecta un bucle, consulta este mapa para decirte no solo *que* hay un bucle, sino **exactamente en qué switch y puerto físico está conectado el sensor**.
+*   **💡 Valor Diferencial:** Convierte una alerta genérica ("Bucle en eth0") en una orden de trabajo precisa ("Bucle en eth0, conectado al Switch-Core-01, Puerto Gi1/0/48, IP 10.10.1.1").
+
 ---
 
-### 📊 Telemetría y Observabilidad (Prometheus)
+### 📊 Telemetría y Observabilidad (Prometheus & API)
 
-LoopWarden expone de forma nativa un endpoint compatible con **Prometheus** en el puerto `:9090/metrics`. Esto permite visualizar la salud de la red y del propio motor de detección en tiempo real a través de Grafana, sin necesidad de agentes externos.
+LoopWarden está diseñado bajo la filosofía "Glass Box": visibilidad total interna y externa sin necesidad de agentes de terceros. El sistema expone un servidor HTTP ligero (default `:9090`) con dos endpoints clave para la operación diaria.
 
-*   **Forense de Capa 2:** Desglose granular del tráfico por protocolo (ARP, IPv4, IPv6, VLAN Tagged, LLDP) y tipo de transmisión (Broadcast vs Multicast). Permite identificar qué protocolo exacto está saturando el enlace.
+#### 1. Métricas de Rendimiento (`/metrics`)
+Endpoint compatible nativamente con **Prometheus**. Permite visualizar la salud de la red y del motor de detección en tiempo real a través de Grafana.
+
+*   **Forense de Capa 2:** Desglose granular del tráfico por protocolo (ARP, IPv4, IPv6, VLAN Tagged, LLDP, Control Frames) y tipo de transmisión (Broadcast vs Multicast). Identifica qué protocolo exacto está saturando el enlace.
 *   **Salud del Kernel (Zero-Blindness):** Monitoriza directamente los contadores de descarte del driver de red (`rx_dropped`). Si el Kernel descarta paquetes por saturación de buffer antes de que LoopWarden pueda leerlos, la métrica `loopwarden_socket_drops_total` lo revelará, garantizando que no existan puntos ciegos operativos.
-*   **Tendencias de Amenazas:** Contadores específicos para cada motor de detección (`EngineHits`). Permite correlacionar picos de CPU en los switches con tormentas ARP o bucles físicos detectados históricamente.
-*   **Perfilado de Latencia:** Histogramas de precisión de nanosegundos (`loopwarden_processing_ns`) que miden el tiempo que tarda cada paquete en atravesar los 9 motores de detección, validando el rendimiento "Fast-Path".
+*   **Tendencias de Amenazas:** Contadores específicos para cada motor de detección (`loopwarden_engine_hits_total`). Permite correlacionar picos de CPU en los switches con tormentas ARP o bucles físicos detectados históricamente.
+*   **Perfilado de Latencia:** Histogramas de precisión de nanosegundos (`loopwarden_processing_ns`) que miden el tiempo que tarda cada paquete en atravesar la pila de motores, validando el rendimiento "Fast-Path".
 
 **Verificación Rápida:**
 ```bash
 curl http://localhost:9090/metrics
+```
+
+#### 2. API de Topología en Vivo (`/topology`)
+Gracias al motor *Neighbor Discovery*, LoopWarden mantiene un "mapa de vecindad" en tiempo real escuchando tramas LLDP y CDP. Este endpoint devuelve un snapshot **JSON** del estado actual de las conexiones físicas.
+
+Es ideal para **Scripts de Automatización**, sistemas de Inventario Dinámico o simplemente para saber "¿A qué diablos está conectado este cable?" sin ir al rack.
+
+**Ejemplo de Respuesta:**
+```json
+{
+  "timestamp": "2025-02-07T10:00:00Z",
+  "sensor": "LoopWarden-RackA",
+  "neighbor_count": 2,
+  "neighbors": {
+    "eno1": {
+      "SystemName": "Switch-Core-01",
+      "SystemDesc": "Cisco IOS Software, C2960X Software (X86)...",
+      "PortID": "GigabitEthernet1/0/48",
+      "ManagementIP": "10.20.1.5",
+      "Protocol": "CDP",
+      "VLAN": 1,
+      "AdvertisedTTL": 180000000000,
+      "LastSeen": "2025-02-07T09:59:55Z"
+    },
+    "eno2": {
+      "SystemName": "Access-Switch-Lab",
+      "PortID": "eth0",
+      "Protocol": "LLDP",
+      "ManagementIP": "192.168.100.2",
+      "LastSeen": "2025-02-07T09:58:30Z"
+    }
+  }
+}
 ```
 
 ---
@@ -190,6 +266,7 @@ Esta tabla muestra los parámetros globales. **Nota:** La columna "Override" ind
 | **[algorithms.active_probe]**| `enabled` | `true` | No | Activa/Desactiva la inyección activa de sondas. |
 | | `interval_ms` | `1000` | ✅ Sí | Frecuencia de envío de la sonda (milisegundos). |
 | | `ethertype` | `65535` | ❌ No | Protocolo Ethernet (0xFFFF) usado. Global para interoperabilidad. |
+| | `magic_payload` | `"LOOPWARDEN_PROBE"` | ❌ No | Firma mágica incluida en cada sonda. Debe ser idéntica en todos los sensores. |
 | | `domain` | `"default"`| ✅ Sí | **Contexto de Red.** Etiqueta para agrupar sensores amigos (ej: "VLAN10"). Distinto dominio = Alerta de cruce. |
 | **[algorithms.mac_storm]** | `enabled` | `true` | No | Activa/Desactiva el limitador de velocidad por host. |
 | | `max_pps_per_mac`| `2000` | ✅ Sí | Máximo de paquetes/segundo permitidos por una única MAC. |
@@ -203,6 +280,7 @@ Esta tabla muestra los parámetros globales. **Nota:** La columna "Override" ind
 | | `max_pps` | `500` | ✅ Sí | Límite global de peticiones ARP (`WHO-HAS`) por segundo. |
 | | `scan_ip_threshold`| `10` | ✅ Sí | **Anti-Scan.** IPs destino únicas para considerar "Escaneo". |
 | | `scan_mode_pps` | `100` | ✅ Sí | Límite estricto de PPS si se detecta modo escaneo. |
+| | `garp_threshold` | `50` | ❌ No | Máximo de paquetes GARP (Gratuitous ARP) por segundo antes de alertar. |
 | | `alert_cooldown` | `"30s"` | ❌ No | Frecuencia máxima de alertas por atacante. |
 | **[algorithms.dhcp_hunter]** | `enabled` | `true` | No | Detección de servidores DHCP Rogue. |
 | | `trusted_macs` | `[]` | ✅ Append | Lista de MACs autorizadas (Se suman Global + Override). |
@@ -213,6 +291,18 @@ Esta tabla muestra los parámetros globales. **Nota:** La columna "Override" ind
 | | `trusted_macs` | `[]` | ✅ Append | Únicas MACs permitidas para actuar como Router IPv6 (Aditivo). |
 | **[algorithms.mcast_policer]**| `enabled` | `true` | No | Control de tráfico Multicast. |
 | | `max_pps` | `8000` | ✅ Sí | Límite global de paquetes multicast por segundo. |
+| **[algorithms.bcast_ratio]** | `enabled` | `true` | No | Detección de ratio excesivo de broadcast sobre tráfico total. |
+| | `max_ratio` | `0.7` | ✅ Sí | Porcentaje máximo de broadcast permitido (0.7 = 70%). |
+| | `min_sample_size` | `100` | ✅ Sí | Mínimo de paquetes/segundo necesarios para evaluar el ratio. |
+| | `alert_cooldown` | `"30s"` | ❌ No | Tiempo mínimo entre alertas repetidas. |
+| **[algorithms.vlan_leak]** | `enabled` | `false` | No | Detección de tráfico cruzando entre pares de VLANs prohibidos. |
+| | `prohibited_pairs` | `[]` | ❌ No | Lista de pares de VLANs que nunca deben compartir tráfico (ej: `[[10,200], [100,300]]`). |
+| | `alert_cooldown` | `"60s"` | ❌ No | Tiempo mínimo entre alertas por MAC. |
+| **[algorithms.meta_engine]** | `enabled` | `true` | No | Correlador multi-motor. Eleva severidad cuando múltiples motores disparan simultáneamente. |
+| | `window` | `"2s"` | ❌ No | Ventana temporal para correlacionar alertas de distintos motores. |
+| | `threshold` | `2` | ❌ No | Número mínimo de motores distintos que deben disparar para confirmar. |
+| | `cooldown` | `"30s"` | ❌ No | Tiempo mínimo entre alertas de correlación. |
+| **[algorithms.neighbor_discovery]** | `enabled` | `true` | No | Activa la escucha pasiva de LLDP/CDP. Es vital para enriquecer las alertas con datos del switch vecino. |
 
 #### Ejemplo de Configuración con Overrides
 
@@ -243,6 +333,19 @@ trusted_macs = ["AA:BB:CC:DD:EE:FF"] # DHCP Corporativo (Global)
     # Excepción para Laboratorio (eno3): Permite DHCP extra
     [algorithms.dhcp_hunter.overrides.eno3]
     trusted_macs = ["00:11:22:33:44:55"] # Resultado en eno3: Global + Local
+
+# DETECCIÓN DE FUGAS ENTRE VLANS
+[algorithms.vlan_leak]
+enabled = true
+prohibited_pairs = [[10, 200], [100, 300]]  # Pares que NUNCA deben compartir tráfico
+alert_cooldown = "60s"
+
+# CORRELADOR MULTI-MOTOR
+[algorithms.meta_engine]
+enabled = true
+window = "2s"       # Ventana para correlacionar alertas
+threshold = 2       # Motores mínimos para confirmar
+cooldown = "30s"
 ```
 
 ### 📊 Telemetría
@@ -365,23 +468,60 @@ Antes de ajustar los números, decide tu estrategia de despliegue para mantener 
         *   **Síntoma:** La red WiFi colapsa pero la cableada no.
         *   **Causa:** El tráfico Multicast inunda el espectro aéreo (se transmite a velocidad base). Bajar esto protege la WiFi.
 
+### 📊 BcastRatio (Ratio de Broadcast)
+*Alerta temprana de degradación proporcional.*
+
+*   **`max_ratio` (Porcentaje Máximo)**
+    *   **📈 CUÁNDO SUBIR (ej: 0.85):**
+        *   **Síntoma:** Alertas frecuentes en redes con muchos dispositivos Windows (NetBIOS) o IoT que generan broadcast legítimo.
+    *   **📉 CUÁNDO BAJAR (ej: 0.5):**
+        *   **Síntoma:** Redes críticas (Datacenter, SCADA) donde cualquier broadcast significativo es anormal.
+*   **`min_sample_size` (Muestra Mínima)**
+    *   **📈 CUÁNDO SUBIR (ej: 500):**
+        *   **Síntoma:** Falsos positivos en interfaces con poco tráfico (ej: enlace de gestión con 50 pps donde 40 son ARP).
+    *   **📉 CUÁNDO BAJAR (ej: 50):**
+        *   **Síntoma:** Redes de baja velocidad donde 100 pps ya es significativo.
+
+### ☣️ VlanLeak (Fugas entre VLANs)
+*Vigilancia de segmentación de red.*
+
+*   **`prohibited_pairs` (Pares Prohibidos)**
+    *   **Acción:** Define explícitamente qué pares de VLANs **nunca** deben compartir tráfico. Ejemplo: `[[10, 200]]` prohibirá que una MAC vista en VLAN 10 aparezca en VLAN 200.
+    *   **Planificación:** Revisa tu matriz de segmentación de red. Los pares típicos a prohibir son: Gestión vs Invitados, Servidores vs IoT, Producción vs Desarrollo.
+
+### 🧠 MetaEngine (Correlación)
+*Ajuste de sensibilidad de confirmación.*
+
+*   **`threshold` (Motores Mínimos)**
+    *   **📈 CUÁNDO SUBIR (ej: 3-4):**
+        *   **Síntoma:** Alertas de correlación demasiado frecuentes. Quieres máxima certeza antes de escalar.
+    *   **📉 CUÁNDO BAJAR (ej: 2):**
+        *   **Síntoma:** Default. Dos motores independientes confirmando ya es alta confianza.
+*   **`window` (Ventana de Correlación)**
+    *   **"2s" (Default):** Estándar para bucles que disparan alertas casi instantáneamente.
+    *   **"5s" (Amplia):** Útil si los motores tienen cooldowns largos y las alertas llegan con desfase.
+
 ## 🚨 Playbook de Respuesta a Incidentes
 
 Guía de actuación rápida para operadores de red (NOC) ante alertas críticas de LoopWarden:
 
 | Alerta Recibida | Causa Probable | Acción Recomendada |
 | :--- | :--- | :--- |
-| **ActiveProbe:**<br>`LOOP CONFIRMED` | **Bucle Físico Cerrado (Hard Loop).**<br>Un cable conecta dos puertos del mismo dominio de broadcast y STP no lo ha bloqueado. | **ACCION INMEDIATA (CRÍTICO)**<br>1. El bucle es físico y total. La red caerá en segundos.<br>2. Revisa los últimos cables conectados.<br>3. Desconecta enlaces redundantes hasta que cese la alerta. |
-| **MacStorm:**<br>`MAC VELOCITY ALERT` | **Host Inundador.**<br>Tarjeta de red averiada ("Jabbering NIC"), virus o bucle local. | **AISLAR Y APAGAR**<br>1. Copia la MAC de la alerta.<br>2. Búscala en el switch: `show mac address-table address <MAC>`.<br>3. Apaga el puerto (`shutdown`). |
+| **ActiveProbe:**<br>`LOOP CONFIRMED` | **Bucle Físico Cerrado.** | **ACCION INMEDIATA**<br>La alerta ahora incluye el campo `CONNECTED TO`. **Ve directamente a ese switch y puerto indicado** y desconecta el cable. No necesitas rastrear cables manualmente. |
 | **FlapGuard:**<br>`MAC FLAPPING` | **Inestabilidad de Topología.**<br>Un cable puenteando dos VLANs o error de Native VLAN. | **INVESTIGAR CABLEADO**<br>1. Rastrea la MAC para ver entre qué puertos salta.<br>2. Verifica "Native VLAN" en Trunks. |
 | **ArpWatchdog:**<br>`ARP STORM` | **Tormenta de Plano de Control.**<br>Síntoma temprano de bucle o escaneo masivo. | **CORRELACIONAR**<br>1. Si aparece con *EtherFuse*, es un bucle.<br>2. Si aparece sola, es un host infectado: localízalo y aíslalo. |
 | **DhcpHunter:**<br>`ROGUE DHCP` | **Router doméstico conectado.**<br>Alguien conectó un router TP-Link/D-Link por el puerto LAN. | **BLOQUEO INMEDIATO**<br>La MAC reportada es el puerto del router intruso. Bloquea ese puerto en el switch o usa *BPDU Guard*. |
 | **FlowPanic:**<br>`PAUSE FLOOD` | **Fallo Hardware / DoS.**<br>NIC muriendo o ataque de denegación de servicio a nivel L2. | **REEMPLAZO**<br>El dispositivo origen está defectuoso. Desconéctalo antes de que congele el switch entero. |
 | **RaGuard:**<br>`ROGUE IPV6 RA` | **MITM IPv6.**<br>Un PC mal configurado o atacante se anuncia como Gateway IPv6. | **SEGURIDAD**<br>Investiga la MAC origen. Puede ser un intento de interceptar tráfico mediante autoconfiguración IPv6. |
+| **McastPolicer:**<br>`MULTICAST STORM` | **Tormenta Multicast.**<br>Software de clonación, IPTV o cámaras IP fuera de control. | **INVESTIGAR ORIGEN**<br>Identifica la fuente multicast. Puede ser FOG/Clonezilla mal configurado o un bucle amplificando multicast. |
+| **BcastRatio:**<br>`HIGH BROADCAST RATIO` | **Degradación de red.**<br>El porcentaje de broadcast supera el umbral configurado. | **MONITORIZAR**<br>Alerta temprana. Si supera el 80%, la red está al borde del colapso. Correlaciona con EtherFuse/ActiveProbe. |
+| **VlanLeak:**<br>`VLAN LEAKAGE` | **Fuga de segmentación.**<br>Tráfico cruzando entre VLANs que deberían estar aisladas. | **AUDITORÍA INMEDIATA**<br>Revisa la configuración de trunks y puertos de acceso. Posible violación de políticas de segmentación (PCI-DSS). |
+| **MetaEngine:**<br>`CONFIRMED LOOP` | **Bucle confirmado con alta confianza.**<br>Múltiples motores independientes han disparado simultáneamente. | **ACCIÓN INMEDIATA**<br>Es prácticamente certeza. Sigue las indicaciones de `CONNECTED TO` y desconecta el cable problemático. |
+| **ArpWatchdog:**<br>`GRATUITOUS ARP FLOOD` | **Conflicto IP o ataque ARP.**<br>Inundación de paquetes GARP desde un host. | **INVESTIGAR**<br>Puede ser VRRP/HSRP flapping, conflicto de IPs duplicadas o un ataque de ARP Poisoning activo. |
 
 ## 🛠️ Instalación y Uso
 
-LoopWarden está diseñado para ser compilado y ejecutado directamente desde su código fuente en entornos Linux. Se requiere Go 1.21+ y `make` para el proceso de compilación.
+LoopWarden está diseñado para ser compilado y ejecutado directamente desde su código fuente en entornos Linux. Se requiere Go 1.25+ y `make` para el proceso de compilación.
 
 ### Compilación y Ejecución Segura
 
@@ -434,6 +574,32 @@ sudo cp deploy/systemd/loopwarden.service /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable --now loopwarden
 ```
+
+### Compilación Cruzada (Raspberry Pi y OpenWRT)
+
+LoopWarden soporta compilación cruzada para múltiples plataformas embebidas:
+
+```bash
+# Raspberry Pi 3/4/5/Zero2 (ARM64)
+make build-pi
+# Resultado: ./bin/loopwarden-pi-arm64
+
+# Raspberry Pi 2/Zero Legacy (ARMv7 32-bit)
+make build-pi-32
+# Resultado: ./bin/loopwarden-pi-arm7
+
+# OpenWRT Routers Ramips (MIPSLE Softfloat) - Sin compresión
+make build-openwrt
+# Resultado: ./bin/loopwarden-openwrt-ramips
+
+# OpenWRT con compresión UPX (requiere 'upx' instalado)
+make build-openwrt-upx
+# Resultado: ./bin/loopwarden-openwrt-ramips-compressed
+```
+
+### Web Dashboard
+
+LoopWarden incluye un dashboard web ligero en `web/dashboard/` que permite visualizar el estado del sensor y la topología de vecinos desde el navegador. Consulta los archivos `index.html` y `api.php` del directorio para su despliegue.
 
 ### Tuning para Alto Rendimiento (>10Gbps)
 

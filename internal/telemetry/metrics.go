@@ -2,6 +2,8 @@ package telemetry
 
 import (
 	"encoding/binary"
+	"runtime"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
@@ -63,7 +65,105 @@ var (
 		Name: "loopwarden_arp_ops_total",
 		Help: "ARP operations breakdown (request/reply)",
 	}, []string{"interface", "operation"})
+
+	// 7. TOPOLOGÍA
+	// Etiquetas: interface, protocol (LLDP/CDP)
+	NeighborsDetected = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "loopwarden_neighbor_packets_total",
+		Help: "Number of valid LLDP/CDP packets received containing topology info",
+	}, []string{"interface", "protocol"})
+
+	// 8. TASA DE PAQUETES POR SEGUNDO (PPS)
+	// Etiquetas: interface
+	RxPPS = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "loopwarden_rx_pps",
+		Help: "Current packet rate (packets per second) by interface",
+	}, []string{"interface"})
+
+	// 9. BACKLOG / COLA INTERNA DEL NOTIFIER
+	NotifierBacklog = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "loopwarden_notifier_backlog",
+		Help: "Current number of pending alerts in the notifier channel",
+	})
+
+	NotifierDropped = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "loopwarden_notifier_dropped_total",
+		Help: "Total alerts dropped due to full notifier channel",
+	})
+
+	// 10. DROPS POR INTERFAZ (Drops aplicación: paquetes descartados por error de lectura)
+	AppDrops = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "loopwarden_app_drops_total",
+		Help: "Packets dropped at application level (read errors, short packets)",
+	}, []string{"interface", "reason"})
+
+	// 11. LATENCIA P95/P99 DE PROCESAMIENTO (Histograma con buckets extendidos)
+	ProcessingLatency = promauto.NewHistogramVec(prometheus.HistogramOpts{
+		Name:    "loopwarden_processing_latency_ns",
+		Help:    "Full-range processing latency in nanoseconds (use histogram_quantile for p95/p99)",
+		Buckets: []float64{500, 1000, 2500, 5000, 10000, 25000, 50000, 100000, 250000, 500000, 1000000, 5000000, 10000000},
+	}, []string{"interface"})
+
+	// 12. ERRORES POR ENGINE
+	// Etiquetas: interface, engine
+	EngineErrors = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "loopwarden_engine_errors_total",
+		Help: "Errors encountered during engine packet processing (panics recovered)",
+	}, []string{"interface", "engine"})
+
+	// 13. MEMORY FRAGMENTATION (Go Runtime)
+	MemHeapInuse = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "loopwarden_mem_heap_inuse_bytes",
+		Help: "Bytes in in-use heap spans",
+	})
+
+	MemHeapIdle = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "loopwarden_mem_heap_idle_bytes",
+		Help: "Bytes in idle (unused) heap spans",
+	})
+
+	MemHeapReleased = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "loopwarden_mem_heap_released_bytes",
+		Help: "Bytes of heap memory returned to the OS",
+	})
+
+	MemHeapObjects = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "loopwarden_mem_heap_objects",
+		Help: "Number of allocated heap objects",
+	})
+
+	MemGCCycles = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "loopwarden_mem_gc_cycles_total",
+		Help: "Completed GC cycles",
+	})
+
+	MemHeapFragmentation = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "loopwarden_mem_heap_fragmentation_ratio",
+		Help: "Heap fragmentation ratio: idle / (inuse + idle). 0 = no fragmentation, 1 = fully fragmented",
+	})
 )
+
+// StartMemoryCollector inicia una goroutine que actualiza métricas de memoria periódicamente.
+func StartMemoryCollector(interval time.Duration) {
+	go func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		var m runtime.MemStats
+		for range ticker.C {
+			runtime.ReadMemStats(&m)
+			MemHeapInuse.Set(float64(m.HeapInuse))
+			MemHeapIdle.Set(float64(m.HeapIdle))
+			MemHeapReleased.Set(float64(m.HeapReleased))
+			MemHeapObjects.Set(float64(m.HeapObjects))
+			MemGCCycles.Set(float64(m.NumGC))
+
+			total := float64(m.HeapInuse + m.HeapIdle)
+			if total > 0 {
+				MemHeapFragmentation.Set(float64(m.HeapIdle) / total)
+			}
+		}
+	}()
+}
 
 // TrackPacket analiza el paquete RAW y actualiza métricas.
 // AHORA requiere ifaceName.

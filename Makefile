@@ -23,9 +23,10 @@ GOVET       := $(GOCMD) vet
 # --- Flags de Compilación ---
 # -s: Omitir tabla de símbolos (menor tamaño)
 # -w: Omitir información de depuración DWARF (menor tamaño)
+# NOTA: Para OpenWRT añadimos -trimpath en el target específico
 LDFLAGS     := -ldflags "-s -w"
 
-# --- Colores para la terminal (Lo hace ver "chulo") ---
+# --- Colores para la terminal ---
 COLOR_RESET = \033[0m
 COLOR_CYAN  = \033[36m
 COLOR_GREEN = \033[32m
@@ -36,7 +37,7 @@ COLOR_RED   = \033[31m
 #  🎯 TARGETS
 # ==============================================================================
 
-.PHONY: all build clean run deps lint test setup help
+.PHONY: all build clean run deps lint test setup help build-pi build-pi-32 build-openwrt build-openwrt-upx
 
 ## 🚀 Default: Descarga dependencias y compila
 all: deps build
@@ -47,6 +48,34 @@ build:
 	@mkdir -p $(BUILD_DIR)
 	@CGO_ENABLED=0 GOOS=$(GOOS) GOARCH=$(GOARCH) $(GOBUILD) $(LDFLAGS) -o $(BUILD_DIR)/$(BINARY_NAME) $(MAIN_PATH)
 	@echo "$(COLOR_GREEN)✅ Build completado: $(BUILD_DIR)/$(BINARY_NAME)$(COLOR_RESET)"
+
+## 🍓 Build Pi: Compila binario para Raspberry Pi (ARM64 - Pi 3/4/5/Zero2)
+build-pi:
+	@echo "$(COLOR_CYAN)🍓 Compilando $(BINARY_NAME) para Raspberry Pi (Linux/ARM64)...$(COLOR_RESET)"
+	@mkdir -p $(BUILD_DIR)
+	@CGO_ENABLED=0 GOOS=linux GOARCH=arm64 $(GOBUILD) $(LDFLAGS) -o $(BUILD_DIR)/$(BINARY_NAME)-pi-arm64 $(MAIN_PATH)
+	@echo "$(COLOR_GREEN)✅ Build Pi (ARM64) completado: $(BUILD_DIR)/$(BINARY_NAME)-pi-arm64$(COLOR_RESET)"
+
+## 🍓 Build Pi 32bit: Compila binario para Raspberry Pi Legacy (ARMv7 - Pi 2/Zero)
+build-pi-32:
+	@echo "$(COLOR_CYAN)🍓 Compilando $(BINARY_NAME) para Raspberry Pi 32-bit (Linux/ARMv7)...$(COLOR_RESET)"
+	@mkdir -p $(BUILD_DIR)
+	@CGO_ENABLED=0 GOOS=linux GOARCH=arm GOARM=7 $(GOBUILD) $(LDFLAGS) -o $(BUILD_DIR)/$(BINARY_NAME)-pi-arm7 $(MAIN_PATH)
+	@echo "$(COLOR_GREEN)✅ Build Pi 32-bit completado: $(BUILD_DIR)/$(BINARY_NAME)-pi-arm7$(COLOR_RESET)"
+
+## 📶 Build OpenWRT: Compila para Routers Ramips (MIPSLE Softfloat) - SAFE MODE
+build-openwrt:
+	@echo "$(COLOR_CYAN)📶 Compilando $(BINARY_NAME) para OpenWRT Ramips (MIPSLE/Softfloat)...$(COLOR_RESET)"
+	@mkdir -p $(BUILD_DIR)
+	@# Añadido -trimpath para reducir paths absolutos y ahorrar unos KB extra de forma segura
+	@CGO_ENABLED=0 GOOS=linux GOARCH=mipsle GOMIPS=softfloat $(GOBUILD) $(LDFLAGS) -trimpath -o $(BUILD_DIR)/$(BINARY_NAME)-openwrt-ramips $(MAIN_PATH)
+	@echo "$(COLOR_GREEN)✅ Build OpenWRT completado: $(BUILD_DIR)/$(BINARY_NAME)-openwrt-ramips$(COLOR_RESET)"
+
+## 📦 Build OpenWRT UPX: Compila y comprime (Requiere 'upx' instalado) - AGGRESSIVE MODE
+build-openwrt-upx: build-openwrt
+	@echo "$(COLOR_YELLOW)📦 Comprimiendo binario OpenWRT con UPX...$(COLOR_RESET)"
+	@upx --lzma --best $(BUILD_DIR)/$(BINARY_NAME)-openwrt-ramips -o $(BUILD_DIR)/$(BINARY_NAME)-openwrt-ramips-compressed
+	@echo "$(COLOR_GREEN)✅ Build OpenWRT Comprimido: $(BUILD_DIR)/$(BINARY_NAME)-openwrt-ramips-compressed$(COLOR_RESET)"
 
 ## 🏃 Run: Ejecuta la aplicación (usa sudo automáticamente)
 run: build
@@ -98,7 +127,7 @@ help:
 		if (helpMessage) { \
 			helpCommand = substr($$1, 0, index($$1, ":")-1); \
 			helpMessage = substr(lastLine, RSTART + 3, RLENGTH); \
-			printf "  $(COLOR_GREEN)%-10s$(COLOR_RESET) %s\n", helpCommand, helpMessage; \
+			printf "  $(COLOR_GREEN)%-20s$(COLOR_RESET) %s\n", helpCommand, helpMessage; \
 		} \
 	} \
 	{ lastLine = $$0 }' $(MAKEFILE_LIST)
