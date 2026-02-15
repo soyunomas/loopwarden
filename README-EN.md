@@ -9,7 +9,7 @@
 
 ## 🚀 Key Features
 
-LoopWarden runs **10 concurrent detection engines**. Each one looks for a specific "signature" of failure or threat on the network, providing complete Layer 2 visibility:
+LoopWarden runs **13 concurrent detection engines**. Each one looks for a specific "signature" of failure or threat on the network, providing complete Layer 2 visibility:
 
 ### 1. ActiveProbe (Deterministic Active Injection) ⚡
 *The network's "Sonar". The only way to be certain.*
@@ -68,6 +68,7 @@ LoopWarden runs **10 concurrent detection engines**. Each one looks for a specif
     *   ✅ **Network Scans (Discovery):** Sequential IP sweeps (`nmap`, `arp-scan`). The log will show `SUBNET SCANNING`.
     *   ✅ **Network Loops:** The same ARP packet repeating infinitely toward a single IP. The log will show `SINGLE TARGET ATTACK`.
     *   ✅ **Virus/Malware:** Lateral propagation of worms trying to discover victims in the subnet.
+    *   ✅ **Gratuitous ARP Flood:** GARP packet flooding (Sender IP == Target IP) indicative of IP conflicts, VRRP/HSRP flapping, or ARP Poisoning attacks.
 
 ### 6. DhcpHunter (Rogue DHCP Hunter) 🦈
 *Security against Man-in-the-Middle.*
@@ -106,7 +107,40 @@ LoopWarden runs **10 concurrent detection engines**. Each one looks for a specif
     *   ✅ **Cloning Storms:** Misconfigured software like FOG/Clonezilla.
     *   ✅ **Video Leaks:** IP cameras or IPTV flooding access ports.
     
-### 10. Multi-Stack Granular Tuning 🎛️
+
+### 10. BcastRatio (Broadcast vs Total Ratio) 📊
+*Early warning of network degradation.*
+
+*   **🔬 Mechanics:** Atomically counts all received packets and those that are pure broadcast (`FF:FF:FF:FF:FF:FF`). Every second it calculates the broadcast percentage over the total.
+*   **🛡️ Detection Logic:** If the ratio exceeds the configured threshold (`max_ratio`, default 70%) with a minimum sample (`min_sample_size`, default 100 pkts/s), it generates a degradation alert.
+*   **💡 Differential Value:** Detects the **formation** of a storm before it becomes catastrophic. An 80% broadcast ratio indicates the network is on the brink of collapse even if the absolute PPS hasn't triggered other engines.
+*   **🎯 What it detects:**
+    *   ✅ **Incipient Storms:** Slow loops that don't yet generate enough PPS for EtherFuse but are already degrading the network.
+    *   ✅ **Gradual Degradation:** Networks where broadcast grows slowly due to accumulation of misconfigured devices.
+
+### 11. VlanLeak (Inter-VLAN Leak Detector) ☣️
+*Network segment isolation surveillance.*
+
+*   **🔬 Mechanics:** Tracks which VLANs each source MAC visits. Maintains a `MAC → {VLAN → last seen}` map and compares it against a list of **prohibited VLAN pairs** defined in the configuration.
+*   **🛡️ Detection Logic:** If the same MAC appears in two VLANs that are marked as prohibited (e.g., Server VLAN 10 and Guest VLAN 200), an immediate segmentation leak alert is generated.
+*   **💡 Differential Value:** While *FlapGuard* detects rapid VLAN changes (flapping), *VlanLeak* detects traffic that should **never cross** between segments, regardless of speed. Ideal for compliance audits (PCI-DSS, ISO 27001).
+*   **🎯 What it detects:**
+    *   ✅ **Segmentation Leaks:** Management VLAN traffic appearing in the guest VLAN.
+    *   ✅ **Trunk Errors:** Trunk ports allowing VLANs they shouldn't.
+    *   ✅ **Policy Violations:** Devices accessing segments prohibited by network policy.
+
+### 12. MetaEngine (Multi-Engine Correlator) 🧠
+*High-confidence confirmation through cross-correlation.*
+
+*   **🔬 Mechanics:** Subscribes to the Notifier's alert stream. Each time an engine generates an alert, the MetaEngine records the event with its timestamp. Maintains a configurable sliding time window.
+*   **🛡️ Detection Logic:** If **2 or more distinct engines** fire alerts within the same time window (default: 2 seconds), the MetaEngine elevates severity to `CONFIRMED LOOP - MULTI-SIGNAL DETECTION`. Example: if *ActiveProbe* detects a self-loop and *EtherFuse* detects repeated payloads simultaneously, confidence is maximum.
+*   **💡 Differential Value:** Drastically reduces false positives. An individual alert could be noise, but two independent engines confirming the same event in the same time window is near-absolute certainty.
+*   **🎯 What it detects:**
+    *   ✅ **Confirmed Loops:** Correlation between active and passive detection.
+    *   ✅ **Coordinated Attacks:** Multiple simultaneous anomalies (Rogue DHCP + MAC Flood).
+    *   ✅ **Cascade Failures:** Infrastructure problems triggering multiple alarms.
+
+### 13. Multi-Stack Granular Tuning 🎛️
 *Hierarchical per-interface configuration.*
 
 *   **🔬 Mechanics:** LoopWarden allows defining a global security policy and applying **specific exceptions** (Overrides) per interface.
@@ -115,7 +149,7 @@ LoopWarden runs **10 concurrent detection engines**. Each one looks for a specif
     *   **Local:** Relaxes or hardens rules for specific ports (e.g., "The `vlan_guest` interface can make more ARP requests, but `mgmt` has zero tolerance").
 *   **💡 Differential Value:** Allows deploying a single LoopWarden instance to monitor heterogeneous environments (Servers, IoT, Users, Wi-Fi) without generating false positives in noisy zones.
 
-#### 11. Neighbor Discovery (Topology Awareness) 🗺️
+#### 14. Neighbor Discovery (Topology Awareness) 🗺️
 *Physical context for each alert.*
 
 *   **🔬 Mechanics:** A passive engine that decodes **LLDP** (Link Layer Discovery Protocol) and **CDP** (Cisco Discovery Protocol) frames in real-time. Extracts the System Name, Port, Chassis ID, and **Management IP Address** from the neighbor switch.
@@ -233,6 +267,7 @@ This table shows global parameters. **Note:** The "Override" column indicates wh
 | **[algorithms.active_probe]**| `enabled` | `true` | No | Enables/Disables active probe injection. |
 | | `interval_ms` | `1000` | ✅ Yes | Probe sending frequency (milliseconds). |
 | | `ethertype` | `65535` | ❌ No | Ethernet protocol (0xFFFF) used. Global for interoperability. |
+| | `magic_payload` | `"LOOPWARDEN_PROBE"` | ❌ No | Magic signature included in each probe. Must be identical across all sensors. |
 | | `domain` | `"default"`| ✅ Yes | **Network Context.** Label to group friendly sensors (e.g., "VLAN10"). Different domain = Cross alert. |
 | **[algorithms.mac_storm]** | `enabled` | `true` | No | Enables/Disables per-host rate limiter. |
 | | `max_pps_per_mac`| `2000` | ✅ Yes | Maximum packets/second allowed per single MAC. |
@@ -246,6 +281,7 @@ This table shows global parameters. **Note:** The "Override" column indicates wh
 | | `max_pps` | `500` | ✅ Yes | Global ARP request (`WHO-HAS`) limit per second. |
 | | `scan_ip_threshold`| `10` | ✅ Yes | **Anti-Scan.** Unique destination IPs to consider "Scanning". |
 | | `scan_mode_pps` | `100` | ✅ Yes | Strict PPS limit if scan mode is detected. |
+| | `garp_threshold` | `50` | ❌ No | Maximum Gratuitous ARP packets per second before alerting. |
 | | `alert_cooldown` | `"30s"` | ❌ No | Maximum alert frequency per attacker. |
 | **[algorithms.dhcp_hunter]** | `enabled` | `true` | No | Rogue DHCP server detection. |
 | | `trusted_macs` | `[]` | ✅ Append | List of authorized MACs (Global + Override are summed). |
@@ -256,6 +292,17 @@ This table shows global parameters. **Note:** The "Override" column indicates wh
 | | `trusted_macs` | `[]` | ✅ Append | Only MACs allowed to act as IPv6 Router (Additive). |
 | **[algorithms.mcast_policer]**| `enabled` | `true` | No | Multicast traffic control. |
 | | `max_pps` | `8000` | ✅ Yes | Global multicast packets per second limit. |
+| **[algorithms.bcast_ratio]** | `enabled` | `true` | No | Detection of excessive broadcast ratio over total traffic. |
+| | `max_ratio` | `0.7` | ✅ Yes | Maximum allowed broadcast percentage (0.7 = 70%). |
+| | `min_sample_size` | `100` | ✅ Yes | Minimum packets/second needed to evaluate the ratio. |
+| | `alert_cooldown` | `"30s"` | ❌ No | Minimum time between repeated alerts. |
+| **[algorithms.vlan_leak]** | `enabled` | `false` | No | Detection of traffic crossing between prohibited VLAN pairs. |
+| | `prohibited_pairs` | `[]` | ❌ No | List of VLAN pairs that should never share traffic (e.g., `[[10,200], [100,300]]`). |
+| | `alert_cooldown` | `"60s"` | ❌ No | Minimum time between alerts per MAC. |
+| **[algorithms.meta_engine]** | `enabled` | `true` | No | Multi-engine correlator. Elevates severity when multiple engines fire simultaneously. |
+| | `window` | `"2s"` | ❌ No | Time window for correlating alerts from different engines. |
+| | `threshold` | `2` | ❌ No | Minimum number of distinct engines that must fire to confirm. |
+| | `cooldown` | `"30s"` | ❌ No | Minimum time between correlation alerts. |
 | **[algorithms.neighbor_discovery]** | `enabled` | `true` | No | Enables passive LLDP/CDP listening. Vital for enriching alerts with neighbor switch data. |
 
 #### Override Configuration Example
@@ -287,6 +334,19 @@ trusted_macs = ["AA:BB:CC:DD:EE:FF"] # Corporate DHCP (Global)
     # Exception for Lab (eno3): Allows extra DHCP
     [algorithms.dhcp_hunter.overrides.eno3]
     trusted_macs = ["00:11:22:33:44:55"] # Result on eno3: Global + Local
+
+# INTER-VLAN LEAK DETECTION
+[algorithms.vlan_leak]
+enabled = true
+prohibited_pairs = [[10, 200], [100, 300]]  # Pairs that should NEVER share traffic
+alert_cooldown = "60s"
+
+# MULTI-ENGINE CORRELATOR
+[algorithms.meta_engine]
+enabled = true
+window = "2s"       # Window for correlating alerts
+threshold = 2       # Minimum engines to confirm
+cooldown = "30s"
 ```
 
 ### 📊 Telemetry
@@ -409,6 +469,39 @@ Before adjusting numbers, decide your deployment strategy to keep the `config.to
         *   **Symptom:** WiFi network collapses but wired doesn't.
         *   **Cause:** Multicast traffic floods the airspace (transmitted at base rate). Lowering this protects WiFi.
 
+### 📊 BcastRatio (Broadcast Ratio)
+*Early proportional degradation warning.*
+
+*   **`max_ratio` (Maximum Percentage)**
+    *   **📈 WHEN TO INCREASE (e.g., 0.85):**
+        *   **Symptom:** Frequent alerts on networks with many Windows devices (NetBIOS) or IoT generating legitimate broadcast.
+    *   **📉 WHEN TO DECREASE (e.g., 0.5):**
+        *   **Symptom:** Critical networks (Datacenter, SCADA) where any significant broadcast is abnormal.
+*   **`min_sample_size` (Minimum Sample)**
+    *   **📈 WHEN TO INCREASE (e.g., 500):**
+        *   **Symptom:** False positives on low-traffic interfaces (e.g., management link with 50 pps where 40 are ARP).
+    *   **📉 WHEN TO DECREASE (e.g., 50):**
+        *   **Symptom:** Low-speed networks where 100 pps is already significant.
+
+### ☣️ VlanLeak (Inter-VLAN Leaks)
+*Network segmentation surveillance.*
+
+*   **`prohibited_pairs` (Prohibited Pairs)**
+    *   **Action:** Explicitly define which VLAN pairs should **never** share traffic. Example: `[[10, 200]]` will prohibit a MAC seen on VLAN 10 from appearing on VLAN 200.
+    *   **Planning:** Review your network segmentation matrix. Typical pairs to prohibit: Management vs Guest, Servers vs IoT, Production vs Development.
+
+### 🧠 MetaEngine (Correlation)
+*Confirmation sensitivity tuning.*
+
+*   **`threshold` (Minimum Engines)**
+    *   **📈 WHEN TO INCREASE (e.g., 3-4):**
+        *   **Symptom:** Correlation alerts too frequent. You want maximum certainty before escalating.
+    *   **📉 WHEN TO DECREASE (e.g., 2):**
+        *   **Symptom:** Default. Two independent engines confirming is already high confidence.
+*   **`window` (Correlation Window)**
+    *   **"2s" (Default):** Standard for loops that trigger alerts almost instantly.
+    *   **"5s" (Wide):** Useful if engines have long cooldowns and alerts arrive with delay.
+
 ## 🚨 Incident Response Playbook
 
 Quick action guide for network operators (NOC) facing critical LoopWarden alerts:
@@ -421,10 +514,15 @@ Quick action guide for network operators (NOC) facing critical LoopWarden alerts
 | **DhcpHunter:**<br>`ROGUE DHCP` | **Home router connected.**<br>Someone connected a TP-Link/D-Link router through the LAN port. | **IMMEDIATE BLOCK**<br>The reported MAC is the intruder router's port. Block that port on the switch or use *BPDU Guard*. |
 | **FlowPanic:**<br>`PAUSE FLOOD` | **Hardware Failure / DoS.**<br>Dying NIC or L2-level denial of service attack. | **REPLACEMENT**<br>The source device is defective. Disconnect it before it freezes the entire switch. |
 | **RaGuard:**<br>`ROGUE IPV6 RA` | **IPv6 MITM.**<br>A misconfigured PC or attacker announcing itself as IPv6 Gateway. | **SECURITY**<br>Investigate the source MAC. It could be an attempt to intercept traffic through IPv6 autoconfiguration. |
+| **McastPolicer:**<br>`MULTICAST STORM` | **Multicast Storm.**<br>Cloning software, IPTV, or IP cameras out of control. | **INVESTIGATE SOURCE**<br>Identify the multicast source. Could be misconfigured FOG/Clonezilla or a loop amplifying multicast. |
+| **BcastRatio:**<br>`HIGH BROADCAST RATIO` | **Network degradation.**<br>Broadcast percentage exceeds configured threshold. | **MONITOR**<br>Early warning. If it exceeds 80%, the network is on the brink of collapse. Correlate with EtherFuse/ActiveProbe. |
+| **VlanLeak:**<br>`VLAN LEAKAGE` | **Segmentation leak.**<br>Traffic crossing between VLANs that should be isolated. | **IMMEDIATE AUDIT**<br>Review trunk and access port configuration. Possible segmentation policy violation (PCI-DSS). |
+| **MetaEngine:**<br>`CONFIRMED LOOP` | **Loop confirmed with high confidence.**<br>Multiple independent engines have fired simultaneously. | **IMMEDIATE ACTION**<br>This is near-certainty. Follow the `CONNECTED TO` indications and disconnect the problematic cable. |
+| **ArpWatchdog:**<br>`GRATUITOUS ARP FLOOD` | **IP conflict or ARP attack.**<br>GARP packet flooding from a host. | **INVESTIGATE**<br>Could be VRRP/HSRP flapping, duplicate IP conflict, or an active ARP Poisoning attack. |
 
 ## 🛠️ Installation and Usage
 
-LoopWarden is designed to be compiled and run directly from its source code on Linux environments. Go 1.21+ and `make` are required for the compilation process.
+LoopWarden is designed to be compiled and run directly from its source code on Linux environments. Go 1.25+ and `make` are required for the compilation process.
 
 ### Secure Compilation and Execution
 
@@ -477,6 +575,32 @@ sudo cp deploy/systemd/loopwarden.service /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable --now loopwarden
 ```
+
+### Cross-Compilation (Raspberry Pi and OpenWRT)
+
+LoopWarden supports cross-compilation for multiple embedded platforms:
+
+```bash
+# Raspberry Pi 3/4/5/Zero2 (ARM64)
+make build-pi
+# Result: ./bin/loopwarden-pi-arm64
+
+# Raspberry Pi 2/Zero Legacy (ARMv7 32-bit)
+make build-pi-32
+# Result: ./bin/loopwarden-pi-arm7
+
+# OpenWRT Routers Ramips (MIPSLE Softfloat) - No compression
+make build-openwrt
+# Result: ./bin/loopwarden-openwrt-ramips
+
+# OpenWRT with UPX compression (requires 'upx' installed)
+make build-openwrt-upx
+# Result: ./bin/loopwarden-openwrt-ramips-compressed
+```
+
+### Web Dashboard
+
+LoopWarden includes a lightweight web dashboard in `web/dashboard/` that allows visualizing the sensor status and neighbor topology from the browser. See the `index.html` and `api.php` files in that directory for deployment.
 
 ### High Performance Tuning (>10Gbps)
 

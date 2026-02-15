@@ -53,20 +53,18 @@
         font-style: italic;
     }
 
-    /* --- GRID FIJA (SOLUCIÓN DEFINITIVA) --- */
+    /* --- GRID RESPONSIVA (EL CAMBIO CLAVE) --- */
     .grid {
         display: grid;
         /* 
-           CAMBIO CRÍTICO:
-           Quitamos '1fr'. Usamos '150px' fijo.
-           Esto obliga a que las columnas sean siempre de 150px.
-           Si hay 3 eventos, ocuparán 450px + huecos y el resto quedará vacío a la derecha.
-           No se estirarán.
+           REGLA 13 & 42 (KISS): 
+           En lugar de forzar 12 columnas, usamos auto-fit con minmax.
+           - Pantallas grandes: Cabrán ~12 tarjetas.
+           - Pantallas pequeñas: Se reducirán a 1 o 2 columnas automáticamente.
+           - 140px es el ancho mínimo para que la info se lea bien.
         */
-        grid-template-columns: repeat(auto-fill, 150px); 
+        grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); 
         gap: 8px;
-        /* Aseguramos que se alineen al inicio (izquierda) */
-        justify-content: start;
     }
 
     /* --- TARJETA --- */
@@ -228,7 +226,7 @@
 </div>
 
 <script>
-    // --- JS INTACTO ---
+    // --- JS INTACTO PERO MINIMALISTA ---
     const APP = document.getElementById('app');
     const API = 'api.php';
     let lastHash = '';
@@ -238,6 +236,8 @@
 
     async function loop() {
         try {
+            // Nota: En un entorno real sin backend, esto fallará. 
+            // Para probar visualmente puedes mockear la respuesta si lo necesitas.
             const res = await fetch(API);
             const data = await res.json();
             
@@ -338,6 +338,7 @@
         return el;
     }
 
+    // Pequeño helper para evitar problemas con comillas en el onclick inline
     window.openModalFromData = function(elem) {
         const data = JSON.parse(elem.getAttribute('data-ev'));
         window.openModal(data);
@@ -372,7 +373,9 @@
 
 </script>
 
+<!-- Mantengo tu lógica de video fallback tal cual -->
 <video id="keep-awake" autoplay muted loop playsinline style="display:none">
+    <!-- Tu base64 original iría aquí -->
     <source src="data:video/mp4;base64,AAAAHGZ0eXBtcDQyAAAAAG1wNDFtcDQyAAAAAG1vb3YAAA==" type="video/mp4">
 </video>
 

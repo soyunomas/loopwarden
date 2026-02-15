@@ -15,14 +15,14 @@ import (
 )
 
 type BcastRatio struct {
+	// Contadores atómicos PRIMERO para alineación en 32-bit (MIPS/ARM)
+	bcastCount uint64
+	totalCount uint64
+
 	cfg       *config.BcastRatioConfig
 	notify    *notifier.Notifier
 	ifaceName string
 	store     *TopologyStore
-
-	// Contadores atómicos para el segundo actual
-	bcastCount uint64
-	totalCount uint64
 
 	// Configuración efectiva
 	maxRatio      float64
