@@ -18,8 +18,11 @@ var loopSignatures = [][]string{
 	{"ActiveProbe", "EtherFuse"},
 	{"ActiveProbe", "MacStorm"},
 	{"ActiveProbe", "FlapGuard"},
+	{"ActiveProbe", "BcastRatio"},
+	{"ActiveProbe", "McastPolicer"},
 	{"EtherFuse", "MacStorm"},
 	{"EtherFuse", "FlapGuard"},
+	{"EtherFuse", "BcastRatio"},
 	{"EtherFuse", "McastPolicer"},
 	{"ActiveProbe", "EtherFuse", "MacStorm"},
 }
@@ -80,6 +83,13 @@ func (me *MetaEngine) IngestAlert(msg string) {
 		return
 	}
 
+	// Filtrar por interfaz: solo procesar alertas de nuestra propia interfaz.
+	// Todos los engines emiten "INTERFACE:" seguido del nombre.
+	// Sin este filtro, un Notifier global con N interfaces causa cross-contamination.
+	if !me.belongsToInterface(msg) {
+		return
+	}
+
 	// Determinamos el tipo de amenaza (simplificado)
 	threatType := "Anomaly"
 	if strings.Contains(msg, "LOOP") {
@@ -91,6 +101,26 @@ func (me *MetaEngine) IngestAlert(msg string) {
 	}
 
 	me.RecordHit(engineName, threatType)
+}
+
+// belongsToInterface verifica que la alerta pertenece a nuestra interfaz.
+// Parsea "INTERFACE:   <name>" del cuerpo del mensaje.
+func (me *MetaEngine) belongsToInterface(msg string) bool {
+	const marker = "INTERFACE:"
+	idx := strings.Index(msg, marker)
+	if idx == -1 {
+		return false // Sin info de interfaz, descartamos
+	}
+
+	after := msg[idx+len(marker):]
+	// Trim espacios hasta el nombre de interfaz
+	after = strings.TrimLeft(after, " ")
+	// Extraer primera palabra (nombre de interfaz) antes de newline o espacio
+	end := strings.IndexAny(after, " \n\r\t(")
+	if end > 0 {
+		after = after[:end]
+	}
+	return after == me.ifaceName
 }
 
 // RecordHit registra que un motor disparó una alerta
