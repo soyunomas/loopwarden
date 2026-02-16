@@ -685,7 +685,7 @@ func TestMcastPolicer_IPv6MulticastDetection(t *testing.T) {
 	mp := NewMcastPolicer(cfg, mockNotifier(), "test0")
 	mp.Start(nil, &net.Interface{Name: "test0"})
 
-	// Paquete con MAC destino IPv6 Multicast: 33:33:xx:xx:xx:xx
+	// Paquete con MAC destino IPv6 Multicast (no-NDP): 33:33:00:xx:xx:xx
 	pkt := make([]byte, 64)
 	copy(pkt[0:6], []byte{0x33, 0x33, 0x00, 0x00, 0x00, 0x01})
 	copy(pkt[6:12], []byte{0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF})
@@ -708,6 +708,40 @@ func TestMcastPolicer_IPv6MulticastDetection(t *testing.T) {
 
 	if !alerted {
 		t.Error("McastPolicer debería haber detectado tormenta multicast IPv6")
+	}
+}
+
+func TestMcastPolicer_IgnoresNDP(t *testing.T) {
+	cfg := &config.McastPolicerConfig{
+		Enabled:   true,
+		MaxPPS:    5,
+		Overrides: make(map[string]config.McastPolicerOverride),
+	}
+
+	mp := NewMcastPolicer(cfg, mockNotifier(), "test0")
+	mp.Start(nil, &net.Interface{Name: "test0"})
+
+	// Solicited-Node Multicast (NDP): 33:33:ff:xx:xx:xx — debe ser ignorado
+	pkt := make([]byte, 64)
+	copy(pkt[0:6], []byte{0x33, 0x33, 0xFF, 0xDD, 0xEE, 0x01})
+	copy(pkt[6:12], []byte{0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF})
+
+	for i := 0; i < 100; i++ {
+		mp.OnPacket(pkt, len(pkt), 0)
+	}
+
+	mp.mu.Lock()
+	mp.lastReset = time.Now().Add(-2 * time.Second)
+	mp.mu.Unlock()
+
+	mp.OnPacket(pkt, len(pkt), 0)
+
+	mp.mu.Lock()
+	alerted := !mp.lastAlert.IsZero()
+	mp.mu.Unlock()
+
+	if alerted {
+		t.Error("McastPolicer no debería contar tráfico NDP Solicited-Node (33:33:ff:*)")
 	}
 }
 
