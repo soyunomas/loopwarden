@@ -36,18 +36,21 @@ func NewEngine(cfg *config.AlgorithmConfig, notify *notifier.Notifier, ifaceName
 	}
 
 	// Meta-Engine (Correlación)
-	// LO INICIALIZAMOS PRIMERO PARA PODER REGISTRARLO
 	if cfg.MetaEngine.Enabled {
 		window, _ := time.ParseDuration(cfg.MetaEngine.Window)
 		cooldown, _ := time.ParseDuration(cfg.MetaEngine.Cooldown)
-		e.metaEngine = NewMetaEngine(notify, ifaceName, store, window, cfg.MetaEngine.Threshold, cooldown)
-		
-		// --- FIX CRÍTICO: CONEXIÓN DE CABLES ---
-		// Registramos el MetaEngine como suscriptor del Notifier.
-		// Ahora, cada vez que ActiveProbe o MacStorm manden una alerta, 
-		// el Notifier la pasará también a e.metaEngine.IngestAlert
+		e.metaEngine = NewMetaEngine(notify, ifaceName, store, window, cfg.MetaEngine.Threshold, cooldown, cfg.MetaEngine.Absorb, cfg.MetaEngine.AbsorbLog)
+
+		// Registrar como observer para recibir todas las alertas
 		notify.Subscribe(e.metaEngine.IngestAlert)
-		log.Printf("🧠 [Engine:%s] MetaEngine wired to Notifier stream", ifaceName)
+
+		// Si absorb está activo, registrar como gate para retener alertas individuales
+		if cfg.MetaEngine.Absorb {
+			notify.SetGate(e.metaEngine)
+			log.Printf("🧠 [Engine:%s] MetaEngine wired (absorb=ON, absorb_log=%v)", ifaceName, cfg.MetaEngine.AbsorbLog)
+		} else {
+			log.Printf("🧠 [Engine:%s] MetaEngine wired to Notifier stream", ifaceName)
+		}
 	}
 
 	// 0. Neighbor Discovery (Passive, Always On preferrably)

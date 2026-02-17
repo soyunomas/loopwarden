@@ -64,7 +64,12 @@ func (mp *McastPolicer) OnPacket(data []byte, length int, vlanID uint16) {
 		isMulticast = true
 	} else if data[0] == 0x33 && data[1] == 0x33 {
 		// Check IPv6 Multicast Prefix: 33:33
-		isMulticast = true
+		// Excluir Solicited-Node Multicast (33:33:ff:*) que es tráfico NDP legítimo.
+		// En redes Dual-Stack grandes, las ráfagas de Neighbor Solicitation
+		// pueden superar fácilmente max_pps sin ser una tormenta real.
+		if data[2] != 0xff {
+			isMulticast = true
+		}
 	}
 
 	if isMulticast {

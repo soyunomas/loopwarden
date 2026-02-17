@@ -18,10 +18,33 @@ var loopSignatures = [][]string{
 	{"ActiveProbe", "EtherFuse"},
 	{"ActiveProbe", "MacStorm"},
 	{"ActiveProbe", "FlapGuard"},
+	{"ActiveProbe", "BcastRatio"},
+	{"ActiveProbe", "McastPolicer"},
 	{"EtherFuse", "MacStorm"},
 	{"EtherFuse", "FlapGuard"},
+	{"EtherFuse", "BcastRatio"},
 	{"EtherFuse", "McastPolicer"},
 	{"ActiveProbe", "EtherFuse", "MacStorm"},
+}
+
+// correlatableEngines es el set de engines que participan en loopSignatures.
+// Se construye una vez en init para no recalcular en hot path.
+var correlatableEngines map[string]struct{}
+
+func init() {
+	correlatableEngines = make(map[string]struct{})
+	for _, sig := range loopSignatures {
+		for _, e := range sig {
+			correlatableEngines[e] = struct{}{}
+		}
+	}
+}
+
+// heldAlert es una alerta retenida temporalmente mientras se espera correlación.
+type heldAlert struct {
+	msg       string
+	engine    string
+	timestamp time.Time
 }
 
 type MetaEngine struct {
@@ -34,9 +57,16 @@ type MetaEngine struct {
 	store        *TopologyStore
 	lastCorAlert time.Time
 	cooldown     time.Duration
+
+	// --- Absorb mode ---
+	absorb    bool
+	absorbLog bool
+	held      []heldAlert    // Alertas retenidas pendientes de decisión
+	heldTimer *time.Timer    // Timer para liberar retenidas si no hay correlación
+	absorbed  bool           // true si ya se emitió CONFIRMED en esta ventana
 }
 
-func NewMetaEngine(notify *notifier.Notifier, ifaceName string, store *TopologyStore, window time.Duration, threshold int, cooldown time.Duration) *MetaEngine {
+func NewMetaEngine(notify *notifier.Notifier, ifaceName string, store *TopologyStore, window time.Duration, threshold int, cooldown time.Duration, absorb bool, absorbLog bool) *MetaEngine {
 	if window == 0 {
 		window = 2 * time.Second
 	}
@@ -54,18 +84,96 @@ func NewMetaEngine(notify *notifier.Notifier, ifaceName string, store *TopologyS
 		ifaceName:  ifaceName,
 		store:      store,
 		cooldown:   cooldown,
+		absorb:     absorb,
+		absorbLog:  absorbLog,
 	}
+}
+
+// ShouldAbsorb implementa notifier.AlertGate.
+// Retiene alertas de engines correlacionables mientras espera la ventana de correlación.
+// Engines no correlacionables (DhcpHunter, RaGuard, etc.) pasan siempre directo.
+func (me *MetaEngine) ShouldAbsorb(msg string) bool {
+	if !me.absorb {
+		return false
+	}
+
+	engineName := me.extractEngine(msg)
+	if engineName == "" || engineName == "MetaEngine" || engineName == "System" {
+		return false
+	}
+
+	if !me.belongsToInterface(msg) {
+		return false
+	}
+
+	if _, ok := correlatableEngines[engineName]; !ok {
+		return false
+	}
+
+	me.mu.Lock()
+	defer me.mu.Unlock()
+
+	if me.absorbLog {
+		log.Printf("[ABSORBED:%s] %s", me.ifaceName, msg)
+	}
+
+	me.held = append(me.held, heldAlert{
+		msg:       msg,
+		engine:    engineName,
+		timestamp: time.Now(),
+	})
+
+	// Si es la primera alerta retenida, iniciar timer de liberación
+	if len(me.held) == 1 {
+		me.absorbed = false
+		me.heldTimer = time.AfterFunc(me.window+200*time.Millisecond, me.releaseHeld)
+	}
+
+	return true
+}
+
+// releaseHeld se ejecuta cuando expira el timer sin que se haya producido correlación.
+// Libera las alertas retenidas al Notifier para que se envíen normalmente.
+func (me *MetaEngine) releaseHeld() {
+	me.mu.Lock()
+	if me.absorbed {
+		// Ya se emitió CONFIRMED → descartar las retenidas (son redundantes)
+		me.held = me.held[:0]
+		me.mu.Unlock()
+		return
+	}
+	// No hubo correlación → liberar todas las retenidas
+	toRelease := make([]string, len(me.held))
+	for i, h := range me.held {
+		toRelease[i] = h.msg
+	}
+	me.held = me.held[:0]
+	me.mu.Unlock()
+
+	for _, msg := range toRelease {
+		me.notify.AlertBypass(msg)
+	}
+}
+
+// extractEngine parsea el nombre del engine desde "[EngineName] ..."
+func (me *MetaEngine) extractEngine(msg string) string {
+	msg = strings.TrimSpace(msg)
+	if !strings.HasPrefix(msg, "[") {
+		return ""
+	}
+	endIndex := strings.Index(msg, "]")
+	if endIndex < 2 {
+		return ""
+	}
+	return msg[1:endIndex]
 }
 
 // IngestAlert es el puente entre el Notifier y el MetaEngine.
 // Analiza el string de alerta para identificar al emisor.
 func (me *MetaEngine) IngestAlert(msg string) {
-	// Formato esperado de los algoritmos: "[EngineName] Mensaje..."
-	// Parseo rápido y sucio (pero efectivo en el Cold Path)
-	
 	msg = strings.TrimSpace(msg)
 	if !strings.HasPrefix(msg, "[") {
-		return // Mensaje de sistema o mal formado
+		return
 	}
 
 	endIndex := strings.Index(msg, "]")
@@ -74,13 +182,15 @@ func (me *MetaEngine) IngestAlert(msg string) {
 	}
 
 	engineName := msg[1:endIndex]
-	
-	// Ignoramos alertas del propio MetaEngine para evitar bucles infinitos de feedback
+
 	if engineName == "MetaEngine" || engineName == "System" {
 		return
 	}
 
-	// Determinamos el tipo de amenaza (simplificado)
+	if !me.belongsToInterface(msg) {
+		return
+	}
+
 	threatType := "Anomaly"
 	if strings.Contains(msg, "LOOP") {
 		threatType = "Loop"
@@ -93,22 +203,35 @@ func (me *MetaEngine) IngestAlert(msg string) {
 	me.RecordHit(engineName, threatType)
 }
 
+// belongsToInterface verifica que la alerta pertenece a nuestra interfaz.
+func (me *MetaEngine) belongsToInterface(msg string) bool {
+	const marker = "INTERFACE:"
+	idx := strings.Index(msg, marker)
+	if idx == -1 {
+		return false
+	}
+
+	after := msg[idx+len(marker):]
+	after = strings.TrimLeft(after, " ")
+	end := strings.IndexAny(after, " \n\r\t(")
+	if end > 0 {
+		after = after[:end]
+	}
+	return after == me.ifaceName
+}
+
 // RecordHit registra que un motor disparó una alerta
 func (me *MetaEngine) RecordHit(engineName string, threatType string) {
 	me.mu.Lock()
 	defer me.mu.Unlock()
 
 	now := time.Now()
-	// Usamos solo el engineName como clave para la correlación cross-threat
-	// (Ej: DhcpHunter + MacStorm = Caos generalizado)
-	key := engineName 
-	
+	key := engineName
+
 	me.recentHits[key] = append(me.recentHits[key], now)
 
-	// Limpiar hits antiguos
 	me.pruneOldHits(now)
 
-	// Evaluar correlación
 	me.evaluateCorrelation(now)
 }
 
@@ -155,9 +278,8 @@ func (me *MetaEngine) evaluateCorrelation(now time.Time) {
 		return
 	}
 
-	// Contar engines únicos que dispararon en la ventana
 	var firingEngines []string
-	
+
 	for engineName := range me.recentHits {
 		firingEngines = append(firingEngines, engineName)
 	}
@@ -205,8 +327,17 @@ func (me *MetaEngine) evaluateCorrelation(now time.Time) {
 			topologyInfo)
 	}
 
+	// Marcar como absorbido para que releaseHeld descarte las retenidas
+	if me.absorb {
+		me.absorbed = true
+		if me.heldTimer != nil {
+			me.heldTimer.Stop()
+		}
+		me.held = me.held[:0]
+	}
+
 	telemetry.EngineHits.WithLabelValues(me.ifaceName, "MetaEngine", metricType).Inc()
 
 	log.Printf("%s", alertMsg)
-	go me.notify.Alert(alertMsg)
+	go me.notify.AlertBypass(alertMsg)
 }

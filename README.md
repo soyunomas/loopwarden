@@ -138,6 +138,7 @@ LoopWarden ejecuta **13 motores de detección concurrentes**. Cada uno busca una
     *   ✅ **Bucles Confirmados:** Correlación entre detección activa y pasiva.
     *   ✅ **Ataques Coordinados:** Múltiples anomalías simultáneas (DHCP Rogue + MAC Flood).
     *   ✅ **Fallos en Cascada:** Problemas de infraestructura que disparan múltiples alarmas.
+*   **🔇 Modo Absorb (Reducción de Ruido):** Cuando `absorb = true`, las alertas individuales de los engines que participan en firmas de correlación (ActiveProbe, EtherFuse, MacStorm, FlapGuard, BcastRatio, McastPolicer) se **retienen temporalmente** durante la ventana de correlación. Si se confirma un bucle, solo se emite la alerta consolidada del MetaEngine, eliminando el ruido de alertas duplicadas. Si no hay correlación al expirar la ventana, las alertas retenidas se liberan normalmente. Los engines no correlacionables (DhcpHunter, RaGuard, FlowPanic, ArpWatch, VlanLeak) siempre pasan directo sin retención.
 
 ### 13. Multi-Stack Granular Tuning 🎛️
 *Configuración jerárquica por interfaz.*
@@ -302,6 +303,8 @@ Esta tabla muestra los parámetros globales. **Nota:** La columna "Override" ind
 | | `window` | `"2s"` | ❌ No | Ventana temporal para correlacionar alertas de distintos motores. |
 | | `threshold` | `2` | ❌ No | Número mínimo de motores distintos que deben disparar para confirmar. |
 | | `cooldown` | `"30s"` | ❌ No | Tiempo mínimo entre alertas de correlación. |
+| | `absorb` | `true` | ❌ No | **Anti-Ruido.** Retiene alertas individuales correlacionables y solo emite la consolidada. |
+| | `absorb_log` | `true` | ❌ No | Escribe alertas absorbidas en log local como red de seguridad forense. |
 | **[algorithms.neighbor_discovery]** | `enabled` | `true` | No | Activa la escucha pasiva de LLDP/CDP. Es vital para enriquecer las alertas con datos del switch vecino. |
 
 #### Ejemplo de Configuración con Overrides
@@ -500,6 +503,14 @@ Antes de ajustar los números, decide tu estrategia de despliegue para mantener 
 *   **`window` (Ventana de Correlación)**
     *   **"2s" (Default):** Estándar para bucles que disparan alertas casi instantáneamente.
     *   **"5s" (Amplia):** Útil si los motores tienen cooldowns largos y las alertas llegan con desfase.
+*   **`absorb` (Modo Absorción de Ruido)**
+    *   **`true` (Recomendado):** Las alertas individuales de engines correlacionables se retienen durante la ventana. Si hay correlación, solo se emite la alerta del MetaEngine. Si no la hay, las retenidas se liberan con un retardo de ~2 segundos.
+    *   **`false`:** Comportamiento clásico. Todas las alertas se envían inmediatamente, incluyendo las del MetaEngine encima de las individuales.
+    *   **⚠️ Riesgo:** Con `absorb = true`, las alertas aisladas (un solo engine sin correlación) se envían con un retardo igual a `window` (~2s). Este retardo no afecta la respuesta humana pero debe considerarse en automatizaciones con SLA estricto.
+*   **`absorb_log` (Log Forense de Absorbidas)**
+    *   **`true` (Recomendado):** Las alertas absorbidas se escriben igualmente en el log local como `[ABSORBED:interfaz]`. Actúa como red de seguridad: si el timer fallara, la evidencia sigue en el log.
+    *   **`false`:** Las alertas absorbidas no dejan rastro en el log. Solo para entornos donde el volumen de log es crítico.
+    *   **⚠️ Riesgo:** Si `absorb_log = false` y el timer de liberación falla, las alertas se pierden sin rastro. Mantener en `true` salvo necesidad extrema.
 
 ## 🚨 Playbook de Respuesta a Incidentes
 

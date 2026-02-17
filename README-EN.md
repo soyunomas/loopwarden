@@ -139,6 +139,7 @@ LoopWarden runs **13 concurrent detection engines**. Each one looks for a specif
     *   ✅ **Confirmed Loops:** Correlation between active and passive detection.
     *   ✅ **Coordinated Attacks:** Multiple simultaneous anomalies (Rogue DHCP + MAC Flood).
     *   ✅ **Cascade Failures:** Infrastructure problems triggering multiple alarms.
+*   **🔇 Absorb Mode (Noise Reduction):** When `absorb = true`, individual alerts from engines participating in correlation signatures (ActiveProbe, EtherFuse, MacStorm, FlapGuard, BcastRatio, McastPolicer) are **temporarily held** during the correlation window. If a loop is confirmed, only the MetaEngine's consolidated alert is emitted, eliminating duplicate alert noise. If no correlation occurs when the window expires, held alerts are released normally. Non-correlatable engines (DhcpHunter, RaGuard, FlowPanic, ArpWatch, VlanLeak) always pass through without retention.
 
 ### 13. Multi-Stack Granular Tuning 🎛️
 *Hierarchical per-interface configuration.*
@@ -303,6 +304,8 @@ This table shows global parameters. **Note:** The "Override" column indicates wh
 | | `window` | `"2s"` | ❌ No | Time window for correlating alerts from different engines. |
 | | `threshold` | `2` | ❌ No | Minimum number of distinct engines that must fire to confirm. |
 | | `cooldown` | `"30s"` | ❌ No | Minimum time between correlation alerts. |
+| | `absorb` | `true` | ❌ No | **Anti-Noise.** Holds individual correlatable alerts and only emits the consolidated one. |
+| | `absorb_log` | `true` | ❌ No | Writes absorbed alerts to local log as a forensic safety net. |
 | **[algorithms.neighbor_discovery]** | `enabled` | `true` | No | Enables passive LLDP/CDP listening. Vital for enriching alerts with neighbor switch data. |
 
 #### Override Configuration Example
@@ -501,6 +504,14 @@ Before adjusting numbers, decide your deployment strategy to keep the `config.to
 *   **`window` (Correlation Window)**
     *   **"2s" (Default):** Standard for loops that trigger alerts almost instantly.
     *   **"5s" (Wide):** Useful if engines have long cooldowns and alerts arrive with delay.
+*   **`absorb` (Noise Absorption Mode)**
+    *   **`true` (Recommended):** Individual alerts from correlatable engines are held during the window. If correlation occurs, only the MetaEngine alert is emitted. If not, held alerts are released with a ~2 second delay.
+    *   **`false`:** Classic behavior. All alerts are sent immediately, including the MetaEngine alert on top of the individual ones.
+    *   **⚠️ Risk:** With `absorb = true`, isolated alerts (a single engine with no correlation) are sent with a delay equal to `window` (~2s). This delay doesn't affect human response but should be considered in automations with strict SLAs.
+*   **`absorb_log` (Forensic Log of Absorbed Alerts)**
+    *   **`true` (Recommended):** Absorbed alerts are still written to the local log as `[ABSORBED:interface]`. Acts as a safety net: if the release timer were to fail, the evidence remains in the log.
+    *   **`false`:** Absorbed alerts leave no trace in the log. Only for environments where log volume is critical.
+    *   **⚠️ Risk:** If `absorb_log = false` and the release timer fails, alerts are lost without a trace. Keep at `true` unless absolutely necessary.
 
 ## 🚨 Incident Response Playbook
 

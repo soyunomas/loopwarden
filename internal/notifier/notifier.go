@@ -20,6 +20,12 @@ const alertBufferSize = 100
 // ObserverFunc define la firma para los "espías" de alertas (e.g. MetaEngine)
 type ObserverFunc func(msg string)
 
+// AlertGate decide si una alerta debe ser retenida (absorbida) o pasar al dispatch.
+// Devuelve true si la alerta debe ser bloqueada (el gate se la queda).
+type AlertGate interface {
+	ShouldAbsorb(msg string) bool
+}
+
 type Notifier struct {
 	cfg        *config.AlertsConfig
 	sensorName string
@@ -37,9 +43,13 @@ type Notifier struct {
 	mutedUntil    time.Time
 	droppedAlerts int
 
-	// --- NUEVO: Observers (Event Bus) ---
+	// --- Observers (Event Bus) ---
 	observers   []ObserverFunc
 	observersMu sync.RWMutex
+
+	// --- Absorb Gate (MetaEngine puede retener alertas individuales) ---
+	gate   AlertGate
+	gateMu sync.RWMutex
 }
 
 func NewNotifier(cfg *config.AlertsConfig, sensorName string) *Notifier {
@@ -86,17 +96,30 @@ func (n *Notifier) Subscribe(fn ObserverFunc) {
 	n.observers = append(n.observers, fn)
 }
 
+// SetGate instala un AlertGate que puede retener alertas antes del dispatch.
+func (n *Notifier) SetGate(g AlertGate) {
+	n.gateMu.Lock()
+	defer n.gateMu.Unlock()
+	n.gate = g
+}
+
 func (n *Notifier) Alert(msg string) {
-	// --- NUEVO: Notificar a los observers ANTES del rate-limit ---
-	// Queremos que el MetaEngine se entere incluso si silenciamos el output externo.
+	// Notificar a los observers ANTES del rate-limit y ANTES del absorb.
+	// El MetaEngine necesita ver todas las alertas para correlacionar.
 	n.observersMu.RLock()
 	for _, fn := range n.observers {
-		// Lanzamos en goroutine para no bloquear el flujo de detección
 		go fn(msg)
 	}
 	n.observersMu.RUnlock()
 
-	// Precepto #8: String Concatenation.
+	// Si hay un gate activo y decide absorber esta alerta, no la despachamos.
+	n.gateMu.RLock()
+	gate := n.gate
+	n.gateMu.RUnlock()
+	if gate != nil && gate.ShouldAbsorb(msg) {
+		return
+	}
+
 	taggedMsg := fmt.Sprintf("[%s] %s", n.sensorName, msg)
 
 	n.mu.Lock()
@@ -133,6 +156,54 @@ func (n *Notifier) Alert(msg string) {
 		n.isMuted = true
 		n.mutedUntil = now.Add(n.muteDuration)
 		
+		warning := fmt.Sprintf("[%s] ⛔ [System] FLOOD PROTECTION. Silencing for %v...", n.sensorName, n.muteDuration)
+		n.mu.Unlock()
+		n.dispatch(warning)
+		return
+	}
+	n.mu.Unlock()
+
+	n.dispatch(taggedMsg)
+}
+
+// AlertBypass envía una alerta sin pasar por el AlertGate.
+// Usado por MetaEngine para emitir su propia alerta consolidada
+// y para liberar alertas retenidas cuando no hubo correlación.
+func (n *Notifier) AlertBypass(msg string) {
+	taggedMsg := fmt.Sprintf("[%s] %s", n.sensorName, msg)
+
+	n.mu.Lock()
+	now := time.Now()
+
+	if n.isMuted {
+		if now.Before(n.mutedUntil) {
+			n.droppedAlerts++
+			n.mu.Unlock()
+			return
+		}
+		n.isMuted = false
+		summary := fmt.Sprintf("⚠️ [System] Resuming alerts. Dropped %d messages.", n.droppedAlerts)
+		n.droppedAlerts = 0
+		n.windowStart = now
+		n.alertCount = 0
+		n.mu.Unlock()
+
+		n.dispatch(fmt.Sprintf("[%s] %s", n.sensorName, summary))
+		n.dispatch(taggedMsg)
+		return
+	}
+
+	if now.Sub(n.windowStart) > time.Minute {
+		n.windowStart = now
+		n.alertCount = 0
+	}
+
+	n.alertCount++
+
+	if n.alertCount > n.maxAlertsPerMin {
+		n.isMuted = true
+		n.mutedUntil = now.Add(n.muteDuration)
+
 		warning := fmt.Sprintf("[%s] ⛔ [System] FLOOD PROTECTION. Silencing for %v...", n.sensorName, n.muteDuration)
 		n.mu.Unlock()
 		n.dispatch(warning)

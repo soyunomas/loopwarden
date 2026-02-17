@@ -134,6 +134,17 @@ chat_id = ""
     window = "2s"
     threshold = 2
     cooldown = "30s"
+    # --- ABSORB MODE: Silencia alertas individuales cuando hay correlación ---
+    # Si true, las alertas de engines correlacionables (ActiveProbe, EtherFuse, MacStorm,
+    # FlapGuard, BcastRatio, McastPolicer) se retienen durante 'window' segundos.
+    # Si hay correlación → solo se emite la alerta consolidada del MetaEngine.
+    # Si NO hay correlación → las alertas retenidas se liberan normalmente.
+    # Engines no correlacionables (DhcpHunter, RaGuard, FlowPanic, ArpWatch,
+    # VlanLeak, NeighborDiscovery) NUNCA se retienen y pasan siempre directo.
+    absorb = true
+    # Si true, las alertas absorbidas se escriben en el log local como [ABSORBED:iface].
+    # Recomendado: mantener en true como red de seguridad forense.
+    absorb_log = true
 
 # --- OVERRIDES: EJEMPLO DE CONFIGURACIÓN POR INTERFAZ ---
 # Aquí es donde configuras los dominios correctos para cada VLAN.

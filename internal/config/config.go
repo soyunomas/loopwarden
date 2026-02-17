@@ -196,6 +196,8 @@ type MetaEngineConfig struct {
 	Window    string `toml:"window"`
 	Threshold int    `toml:"threshold"`
 	Cooldown  string `toml:"cooldown"`
+	Absorb    bool   `toml:"absorb"`     // Retiene alertas individuales y solo emite la consolidada
+	AbsorbLog bool   `toml:"absorb_log"` // Aunque absorba, escribe en log local (forense)
 }
 
 // --- ALERTAS ---
