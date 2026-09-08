@@ -25,8 +25,19 @@ type TelemetryConfig struct {
 }
 
 type NetworkConfig struct {
-	Interfaces []string `toml:"interfaces"`
-	SnapLen    int      `toml:"snaplen"`
+	Interfaces []string        `toml:"interfaces"`
+	SnapLen    int             `toml:"snaplen"`
+	Segments   []NetworkSegment `toml:"segments"`
+}
+
+// NetworkSegment atribuye contexto de Capa 3 a una interfaz/VLAN de Capa 2.
+// VLAN=0 representa tráfico nativo/sin etiqueta. Si una alerta no informa VLAN,
+// el resolvedor solo atribuye el segmento cuando la interfaz es inequívoca.
+type NetworkSegment struct {
+	Name      string `toml:"name"`
+	Interface string `toml:"interface"`
+	VLAN      uint16 `toml:"vlan"`
+	CIDR      string `toml:"cidr"`
 }
 
 type AlgorithmConfig struct {
