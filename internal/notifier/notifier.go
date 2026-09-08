@@ -247,8 +247,7 @@ func (n *Notifier) sendEmail(msg string) {
 // enrichNetworkContext añade NETWORK/SUBNET cuando una alerta puede atribuirse
 // de forma inequívoca a un segmento configurado.
 func (n *Notifier) enrichNetworkContext(msg string) string {
-	if len(n.segments) == 0 || strings.Contains(msg, "
-    NETWORK:") {
+	if len(n.segments) == 0 || strings.Contains(msg, "\n    NETWORK:") {
 		return msg
 	}
 
@@ -267,17 +266,8 @@ func (n *Notifier) enrichNetworkContext(msg string) string {
 		return msg
 	}
 
-	context := fmt.Sprintf("
-    NETWORK:    %s
-    SUBNET:     %s", segment.Name, segment.CIDR)
-	if segment.VLAN != 0 {
-		context += fmt.Sprintf("
-    SEGMENT VLAN: %d", segment.VLAN)
-	}
-
 	// Insertar justo después de INTERFACE para mantener la localización visible arriba.
-	lines := strings.Split(msg, "
-")
+	lines := strings.Split(msg, "\n")
 	for i, line := range lines {
 		if strings.Contains(line, "INTERFACE:") {
 			insert := []string{
@@ -288,11 +278,11 @@ func (n *Notifier) enrichNetworkContext(msg string) string {
 				insert = append(insert, fmt.Sprintf("    SEGMENT VLAN: %d", segment.VLAN))
 			}
 			lines = append(lines[:i+1], append(insert, lines[i+1:]...)...)
-			return strings.Join(lines, "
-")
+			return strings.Join(lines, "\n")
 		}
 	}
-	return msg + context
+
+	return msg
 }
 
 func (n *Notifier) resolveSegment(iface string, vlan uint16, hasVLAN bool) (config.NetworkSegment, bool) {
@@ -319,15 +309,14 @@ func alertField(msg, marker string) (string, bool) {
 		return "", false
 	}
 	value := msg[idx+len(marker):]
-	if end := strings.IndexAny(value, "
-"); end >= 0 {
+	if end := strings.IndexAny(value, "\r\n"); end >= 0 {
 		value = value[:end]
 	}
 	return strings.TrimSpace(value), true
 }
 
 func firstToken(value string) string {
-	if idx := strings.IndexAny(value, " 	("); idx >= 0 {
+	if idx := strings.IndexAny(value, " \t("); idx >= 0 {
 		value = value[:idx]
 	}
 	return strings.TrimSpace(value)
