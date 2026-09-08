@@ -8,6 +8,8 @@ import (
 	"net"
 	"net/http"
 	"net/smtp"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -25,6 +27,7 @@ type Notifier struct {
 	sensorName string
 	alertChan  chan string
 	client     *http.Client
+	segments   []config.NetworkSegment
 
 	// --- Configuración Efectiva (Dampening) ---
 	maxAlertsPerMin int
@@ -43,6 +46,12 @@ type Notifier struct {
 }
 
 func NewNotifier(cfg *config.AlertsConfig, sensorName string) *Notifier {
+	return NewNotifierWithNetwork(cfg, sensorName, nil)
+}
+
+// NewNotifierWithNetwork habilita enriquecimiento de alertas con nombre de red y CIDR.
+// Mantiene NewNotifier para compatibilidad con tests y consumidores existentes.
+func NewNotifierWithNetwork(cfg *config.AlertsConfig, sensorName string, network *config.NetworkConfig) *Notifier {
 	n := &Notifier{
 		cfg:        cfg,
 		sensorName: sensorName,
@@ -52,6 +61,10 @@ func NewNotifier(cfg *config.AlertsConfig, sensorName string) *Notifier {
 		},
 		windowStart: time.Now(),
 		observers:   make([]ObserverFunc, 0),
+	}
+
+	if network != nil {
+		n.segments = append([]config.NetworkSegment(nil), network.Segments...)
 	}
 
 	// 1. Cargar Configuración de Dampening
@@ -87,6 +100,8 @@ func (n *Notifier) Subscribe(fn ObserverFunc) {
 }
 
 func (n *Notifier) Alert(msg string) {
+	msg = n.enrichNetworkContext(msg)
+
 	// --- NUEVO: Notificar a los observers ANTES del rate-limit ---
 	// Queremos que el MetaEngine se entere incluso si silenciamos el output externo.
 	n.observersMu.RLock()
@@ -226,4 +241,111 @@ func (n *Notifier) sendEmail(msg string) {
 	if err != nil {
 		log.Printf("⚠️ [Notifier] SMTP failed: %v", err)
 	}
+}
+
+
+// enrichNetworkContext añade NETWORK/SUBNET cuando una alerta puede atribuirse
+// de forma inequívoca a un segmento configurado.
+func (n *Notifier) enrichNetworkContext(msg string) string {
+	if len(n.segments) == 0 || strings.Contains(msg, "
+    NETWORK:") {
+		return msg
+	}
+
+	iface, ok := alertField(msg, "INTERFACE:")
+	if !ok {
+		return msg
+	}
+	iface = firstToken(iface)
+	if iface == "" {
+		return msg
+	}
+
+	vlan, hasVLAN := alertVLAN(msg)
+	segment, found := n.resolveSegment(iface, vlan, hasVLAN)
+	if !found {
+		return msg
+	}
+
+	context := fmt.Sprintf("
+    NETWORK:    %s
+    SUBNET:     %s", segment.Name, segment.CIDR)
+	if segment.VLAN != 0 {
+		context += fmt.Sprintf("
+    SEGMENT VLAN: %d", segment.VLAN)
+	}
+
+	// Insertar justo después de INTERFACE para mantener la localización visible arriba.
+	lines := strings.Split(msg, "
+")
+	for i, line := range lines {
+		if strings.Contains(line, "INTERFACE:") {
+			insert := []string{
+				fmt.Sprintf("    NETWORK:    %s", segment.Name),
+				fmt.Sprintf("    SUBNET:     %s", segment.CIDR),
+			}
+			if segment.VLAN != 0 && !hasVLAN {
+				insert = append(insert, fmt.Sprintf("    SEGMENT VLAN: %d", segment.VLAN))
+			}
+			lines = append(lines[:i+1], append(insert, lines[i+1:]...)...)
+			return strings.Join(lines, "
+")
+		}
+	}
+	return msg + context
+}
+
+func (n *Notifier) resolveSegment(iface string, vlan uint16, hasVLAN bool) (config.NetworkSegment, bool) {
+	var matches []config.NetworkSegment
+	for _, segment := range n.segments {
+		if segment.Interface != iface {
+			continue
+		}
+		if hasVLAN && segment.VLAN != vlan {
+			continue
+		}
+		matches = append(matches, segment)
+	}
+
+	if len(matches) == 1 {
+		return matches[0], true
+	}
+	return config.NetworkSegment{}, false
+}
+
+func alertField(msg, marker string) (string, bool) {
+	idx := strings.Index(msg, marker)
+	if idx == -1 {
+		return "", false
+	}
+	value := msg[idx+len(marker):]
+	if end := strings.IndexAny(value, "
+"); end >= 0 {
+		value = value[:end]
+	}
+	return strings.TrimSpace(value), true
+}
+
+func firstToken(value string) string {
+	if idx := strings.IndexAny(value, " 	("); idx >= 0 {
+		value = value[:idx]
+	}
+	return strings.TrimSpace(value)
+}
+
+func alertVLAN(msg string) (uint16, bool) {
+	value, ok := alertField(msg, "VLAN:")
+	if !ok {
+		return 0, false
+	}
+	value = strings.TrimSpace(value)
+	if strings.EqualFold(value, "native") || strings.HasPrefix(strings.ToLower(value), "native ") {
+		return 0, true
+	}
+	token := firstToken(value)
+	parsed, err := strconv.ParseUint(token, 10, 16)
+	if err != nil {
+		return 0, false
+	}
+	return uint16(parsed), true
 }
