@@ -16,6 +16,30 @@ interfaces = ["eno1", "eno2", "vlan10"]
 # Longitud de captura (SnapShot Length). 2048 bytes es suficiente para cabeceras + payload.
 snaplen = 2048
 
+# --- SEGMENTOS DE RED (opcional) ---
+# Atribuye las alertas L2 a una red/subred conocida.
+# Si no defines segmentos, LoopWarden funciona igual que antes.
+# VLAN=0 (o VLAN omitida) representa tráfico nativo/sin etiqueta.
+#
+# Ejemplo para una interfaz que pertenece a una sola red:
+# [[network.segments]]
+# name = "CIFP-172"
+# interface = "ens18"
+# cidr = "172.16.0.0/16"
+#
+# Ejemplo con varias VLAN en la misma interfaz:
+# [[network.segments]]
+# name = "USUARIOS"
+# interface = "eno1"
+# vlan = 10
+# cidr = "172.16.10.0/24"
+#
+# [[network.segments]]
+# name = "SERVIDORES"
+# interface = "eno1"
+# vlan = 20
+# cidr = "10.20.0.0/16"
+
 [alerts]
 syslog_server = ""  # Ej: "192.168.1.50:514"
 
