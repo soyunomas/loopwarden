@@ -52,7 +52,7 @@ func main() {
 	// 2. Notifier
 	sensorName := cfg.System.SensorName
 	if sensorName == "" { sensorName = "LoopWarden" }
-	notify := notifier.NewNotifier(&cfg.Alerts, sensorName)
+	notify := notifier.NewNotifierWithNetwork(&cfg.Alerts, sensorName, &cfg.Network)
 
 	if len(cfg.Network.Interfaces) == 0 {
 		log.Fatal("❌ No interfaces defined in config (network.interfaces = [])")
